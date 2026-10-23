@@ -45,6 +45,10 @@ pub(crate) struct FilePolicy {
     resource_dir: std::sync::Arc<std::fs::File>,
     #[cfg(fd_policy)]
     user_dir: std::sync::Arc<std::fs::File>,
+    /// The user root's name when the host keeps it directly inside the
+    /// resource root (`<game>/savedata`): resource reads and listings skip it.
+    #[cfg(fd_policy)]
+    resource_hidden: Option<std::ffi::OsString>,
     #[cfg(hosted_files)]
     hosted: std::sync::Arc<hosted::HostedRoots>,
 }
@@ -133,6 +137,7 @@ fn walk_directory(
     depth: usize,
     count: &mut usize,
     recurse: bool,
+    skip: Option<&std::ffi::OsStr>,
     visit: &mut impl FnMut(&Path, &std::fs::File) -> io::Result<()>,
 ) -> io::Result<()> {
     use std::{
@@ -201,6 +206,9 @@ fn walk_directory(
         {
             continue;
         }
+        if skip.is_some_and(|skip| name.to_bytes().eq_ignore_ascii_case(skip.as_bytes())) {
+            continue;
+        }
         let fd = unsafe {
             libc::openat(
                 dir.as_raw_fd(),
@@ -222,7 +230,7 @@ fn walk_directory(
         let path = prefix.join(std::ffi::OsStr::from_bytes(name.as_bytes()));
         visit(&path, &file)?;
         if metadata.is_dir() && recurse {
-            walk_directory(&file, &path, depth + 1, count, recurse, visit)?;
+            walk_directory(&file, &path, depth + 1, count, recurse, None, visit)?;
         }
     }
     Ok(())
@@ -380,6 +388,13 @@ impl FilePolicy {
         if parts.is_empty() {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
+        if std::ptr::eq(root, &*self.resource_dir)
+            && self.resource_hidden.as_deref().is_some_and(|hidden| {
+                parts[0].as_bytes().eq_ignore_ascii_case(hidden.as_bytes())
+            })
+        {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
         for (i, part) in parts.iter().enumerate() {
             let c = case_component(&dir, part)?;
             let flags = libc::O_RDONLY
@@ -411,6 +426,7 @@ impl FilePolicy {
             0,
             &mut 0,
             true,
+            self.resource_hidden.as_deref(),
             &mut |rel, file| {
                 if !file.metadata()?.is_file() {
                     return Ok(());
@@ -505,7 +521,14 @@ impl FilePolicy {
         }
         let (resource, resource_dir) = open_root(resource,101)?;
         let (user, user_dir) = open_root(user,111)?;
-        if user.starts_with(&resource) || resource.starts_with(&user) {
+        // A user root directly inside the resource root is allowed; that one
+        // directory then no longer exists for resource reads. Deeper nesting,
+        // the same directory, or the resource root inside the user root stay
+        // rejected.
+        let resource_hidden = (user.parent() == Some(resource.as_path()))
+            .then(|| user.file_name().map(|name| name.to_owned()))
+            .flatten();
+        if resource_hidden.is_none() && (user.starts_with(&resource) || resource.starts_with(&user)) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "host_policy:120:0",
@@ -516,6 +539,7 @@ impl FilePolicy {
             user,
             resource_dir: std::sync::Arc::new(resource_dir),
             user_dir: std::sync::Arc::new(user_dir),
+            resource_hidden,
         })
     }
     /// ResourceManager caches archive descriptors. Reject links before opening
@@ -527,6 +551,7 @@ impl FilePolicy {
             0,
             &mut 0,
             true,
+            self.resource_hidden.as_deref(),
             &mut |_, _| Ok(()),
         )
     }
@@ -615,6 +640,11 @@ impl FilePolicy {
         let parent = path.parent().unwrap_or(Path::new(""));
         let wildcard = path.file_name().and_then(|p| p.to_str()).unwrap_or("*");
         let root = self.open_relative(base, &parent.to_string_lossy(), true)?;
+        let skip = if std::ptr::eq(base, &self.resource_dir) && parent.as_os_str().is_empty() {
+            self.resource_hidden.as_deref()
+        } else {
+            None
+        };
         let mut output = Vec::new();
         walk_directory(
             &root,
@@ -622,6 +652,7 @@ impl FilePolicy {
             0,
             &mut 0,
             recursive,
+            skip,
             &mut |name, file| {
                 if (!recursive && name.components().count() != 1)
                     || output.len() >= max_count.clamp(1, 10_000) && max_count != 0
@@ -967,6 +998,38 @@ mod tests {
             std::fs::read(p.resource.join("story")).unwrap(),
             b"resource"
         );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn user_root_directly_inside_the_resource_root_is_hidden_from_resource_reads() {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let base = std::env::temp_dir().join(format!(
+            "ethornell-policy-{}-nested-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let resource = base.join("game");
+        std::fs::create_dir_all(resource.join("savedata/deeper")).unwrap();
+        std::fs::write(resource.join("story"), b"resource").unwrap();
+        assert!(FilePolicy::new(&resource, &resource).is_err());
+        assert!(FilePolicy::new(&resource, &resource.join("savedata/deeper")).is_err());
+        assert!(FilePolicy::new(&resource.join("savedata"), &resource).is_err());
+        let p = FilePolicy::new(&resource, &resource.join("savedata")).unwrap();
+        let _lock = p.lock_writer().unwrap();
+        p.validate_resource_tree().unwrap();
+        p.atomic_write("slot.dat", b"save").unwrap();
+        assert_eq!(p.read_user("slot.dat").unwrap(), b"save");
+        assert_eq!(p.read_loose("slot.dat").unwrap(), b"save");
+        assert_eq!(p.read_loose("story").unwrap(), b"resource");
+        for name in ["bgi-resource/savedata/slot.dat", "bgi-resource/SaveData/slot.dat"] {
+            assert!(p.read_loose(name).is_err(), "{name}");
+            assert!(p.metadata(name).is_none(), "{name}");
+        }
+        assert!(p.read_resource("savedata/slot.dat", 1024).is_err());
+        assert_eq!(p.enumerate("bgi-resource/*", true, 0, false).unwrap(), vec!["story".to_string()]);
+        assert!(p.enumerate("bgi-resource/*", false, 0, true).unwrap().is_empty());
+        assert!(p.enumerate("bgi-resource/savedata/*", false, 0, false).is_err());
+        assert_eq!(p.enumerate("*", false, 0, false).unwrap(), vec!["slot.dat".to_string()]);
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
