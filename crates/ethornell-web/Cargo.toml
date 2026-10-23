@@ -2,6 +2,7 @@
 name = "ethornell-web"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
 
 # The browser build: a wasm-bindgen module that platform/wasm runs in a
 # dedicated worker (see platform/wasm/README.md).

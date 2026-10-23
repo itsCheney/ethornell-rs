@@ -2,6 +2,7 @@
 name = "na_mpeg2_decoder"
 version = "0.1.0"
 edition = "2024"
+license = "MPL-2.0"
 description = "Rust MPEG-1/2 video decoder"
 
 [lib]
