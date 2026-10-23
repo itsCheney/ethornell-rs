@@ -501,7 +501,30 @@ impl FilePolicy {
                             )
                         };
                         if fd < 0 {
-                            return Err(policy_error(stage+3, io::Error::last_os_error()));
+                            let error = io::Error::last_os_error();
+                            // The iOS sandbox refuses to open the app
+                            // container's ancestors (/private/var/mobile/...)
+                            // for reading: EPERM. Open the canonical root by
+                            // its full path instead; the device/inode check
+                            // below still proves it is the directory that
+                            // was resolved.
+                            #[cfg(any(target_os="ios", target_os="macos"))]
+                            if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
+                                let c = CString::new(absolute.as_os_str().as_bytes())?;
+                                let fd = unsafe {
+                                    libc::open(
+                                        c.as_ptr(),
+                                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                                    )
+                                };
+                                if fd < 0 {
+                                    return Err(policy_error(stage+7, io::Error::last_os_error()));
+                                }
+                                dir = unsafe { std::fs::File::from_raw_fd(fd) };
+                                normalized = absolute.clone();
+                                break;
+                            }
+                            return Err(policy_error(stage+3, error));
                         }
                         dir = unsafe { std::fs::File::from_raw_fd(fd) };
                         normalized.push(part);
