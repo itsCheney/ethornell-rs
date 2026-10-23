@@ -103,18 +103,30 @@ fn relative(name: &str) -> Option<PathBuf> {
 }
 
 // Some BGI scripts build their user-data directory from the primary install
-// root. Only this conventional user-data subtree is a writable virtual alias;
-// arbitrary resource-root names remain read-only. It never denotes host IO in
-// the resource directory and never imports original save bytes.
+// root. Only this conventional user-data subtree, and the engine's own save
+// files at the root (BGI.gdb and the BGInnnn.cad config slots, which
+// sub_46B960 puts in the install folder when no file root was validated),
+// are writable virtual aliases; arbitrary resource-root names remain
+// read-only. It never denotes host IO in the resource directory and never
+// imports original save bytes.
 pub(crate) fn user_data_alias(name: &str) -> String {
     let normalized = name.replace('\\', "/");
     if let Some(rest) = normalized.strip_prefix("bgi-resource/") {
         let first = rest.split('/').next().unwrap_or("");
-        if first.eq_ignore_ascii_case("UserData") {
+        if first.eq_ignore_ascii_case("UserData") || is_root_save_file(rest) {
             return format!("bgi-user/{rest}");
         }
     }
     normalized
+}
+
+fn is_root_save_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "bgi.gdb"
+        || lower
+            .strip_prefix("bgi")
+            .and_then(|rest| rest.strip_suffix(".cad"))
+            .is_some_and(|slot| slot.len() == 4 && slot.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[cfg(fd_policy)]
@@ -1219,6 +1231,31 @@ mod tests {
             std::fs::read(p.resource.join("UserData/original.sud")).unwrap(),
             b"original"
         );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn root_save_files_are_user_io() {
+        // Wonderful Everyday HD never validates a file root, so BGI.gdb and
+        // the config slots are written next to the game's archives.
+        let (base, p) = roots("root-saves");
+        std::fs::write(p.resource.join("BGI.gdb"), b"windows save").unwrap();
+        assert!(p.read_user("bgi-resource\\BGI.gdb").is_err());
+        p.atomic_write("bgi-resource\\BGI.gdb", b"global").unwrap();
+        p.atomic_write("bgi-resource\\BGI0001.cad", b"slot")
+            .unwrap();
+        assert_eq!(p.read_user("bgi-resource\\bgi.GDB").unwrap(), b"global");
+        assert_eq!(p.read_user("bgi-user\\BGI0001.cad").unwrap(), b"slot");
+        assert_eq!(
+            std::fs::read(p.resource.join("BGI.gdb")).unwrap(),
+            b"windows save"
+        );
+        for denied in [
+            "bgi-resource/BGI.exe",
+            "bgi-resource/BGI01.cad",
+            "bgi-resource/x/BGI.gdb",
+        ] {
+            assert!(p.atomic_write(denied, b"bad").is_err(), "{denied}");
+        }
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
