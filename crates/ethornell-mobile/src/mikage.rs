@@ -1,6 +1,9 @@
 //! Calls added for the Mikage player (itsCheney/Mikage-Next), next to the
 //! host ABI. They don't change any ABI v1 behaviour.
 //!
+//! `ethornell_mikage_set_launcher` starts the next session with a patch's
+//! launcher executable (see `HostConfig::launcher`).
+//!
 //! `ethornell_mikage_set_log_callback` sends the engine's `tracing` events
 //! (warnings and errors by default) and panic messages to the host, which
 //! has no other way to see them on iOS: the ABI's diagnostics are redacted
@@ -100,6 +103,32 @@ pub unsafe extern "C" fn ethornell_mikage_set_log_callback(
             previous(info);
         }));
     });
+}
+
+thread_local! {
+    static LAUNCHER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The launcher executable for the next `ethornell_ios_create` on this
+/// thread, a file name in the resource root such as `BGI-CHS.exe`: the
+/// files a translation patch packed into it with Enigma Virtual Box win
+/// over the game's archives. NULL or empty clears it; create uses it once.
+/// Status 0, or a negative error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ethornell_mikage_set_launcher(name: *const c_char) -> i32 {
+    let name = (!name.is_null())
+        .then(|| unsafe { std::ffi::CStr::from_ptr(name) }.to_str().map(str::to_owned));
+    let name = match name {
+        Some(Ok(name)) => Some(name).filter(|name| !name.is_empty()),
+        Some(Err(_)) => return super::fail(super::ARG, "launcher name is not UTF-8"),
+        None => None,
+    };
+    LAUNCHER.with(|launcher| *launcher.borrow_mut() = name);
+    0
+}
+
+pub(crate) fn take_launcher() -> Option<String> {
+    LAUNCHER.with(|launcher| launcher.borrow_mut().take())
 }
 
 /// The game's own screen size in its pixels (1280x720 until the game sets

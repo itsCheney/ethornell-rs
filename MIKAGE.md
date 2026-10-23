@@ -14,6 +14,14 @@ a few small commits:
 - The user root may sit directly inside the resource root (Mikage keeps saves
   in `<game>/savedata`). That directory is then invisible to resource reads,
   listings and the archive scan (`file_policy.rs`).
+- On iOS a game folder whose parent folders can't be opened (the app
+  container) is opened by its full path (`file_policy.rs`).
+- Launcher executables: `ethornell_mikage_set_launcher` names a patch's exe in
+  the game folder for the next session. The files a translation patch packed
+  into it with Enigma Virtual Box (`crates/ethornell-archive/src/evb.rs`, with
+  an aPLib unpacker) win over every archive entry of the same name, as loose
+  files in the game folder do on Windows. They are read from the exe on
+  demand; nothing is extracted.
 - No GitHub workflows: upstream's CI and releases don't run on this fork; Mikage builds the library in its own CI.
 - `ethornell_mikage_screen_size`: the game's own screen size, for the host's layout.
 - `ethornell_mikage_set_log_callback` (`crates/ethornell-mobile/src/mikage.rs`,

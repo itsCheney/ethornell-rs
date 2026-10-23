@@ -74,6 +74,7 @@ pub unsafe extern "C" fn ethornell_console_create(
             strict: true,
             trace: false,
             silent: false,
+            launcher: None,
         })
         .map_err(|e| e.to_string())?;
         let gpu = NativeGpu {

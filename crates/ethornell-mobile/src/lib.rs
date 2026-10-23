@@ -368,6 +368,7 @@ pub unsafe extern "C" fn ethornell_android_create(config: *const ConfigV1, out: 
             strict: config.flags & 1 != 0,
             trace: config.flags & 2 != 0,
             silent: config.flags & 4 != 0,
+            launcher: mikage::take_launcher(),
         };
         match HostRuntime::create(config) {
             Ok(runtime) => {

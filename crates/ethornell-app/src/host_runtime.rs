@@ -63,6 +63,10 @@ pub struct HostConfig {
     pub strict: bool,
     pub trace: bool,
     pub silent: bool,
+    /// A patch's launcher executable in the resource root (e.g.
+    /// BGI-CHS.exe): the files packed into it with Enigma Virtual Box win
+    /// over the archives, as they do on Windows.
+    pub launcher: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct HostEvent {
@@ -178,7 +182,23 @@ impl HostRuntime {
             (None, Some(path)) => ethornell_render::FontProvider::load_file(path, config.font_face_index)?,
             (None, None) => ethornell_render::FontProvider::load_system_for_text(if config.gbk {"A日本語中文简体繁體"} else {"A日本語中文"})?,
         };
-        let manager = policy.open_manager()?;
+        #[cfg_attr(not(fd_policy), allow(unused_mut))]
+        let mut manager = policy.open_manager()?;
+        #[cfg(not(fd_policy))]
+        if config.launcher.as_deref().is_some_and(|name| !name.is_empty()) {
+            return Err(EthornellError::Other("launcher executables need host files".into()));
+        }
+        #[cfg(fd_policy)]
+        if let Some(launcher) = config.launcher.as_deref().filter(|name| !name.is_empty()) {
+            if launcher.contains(['/', '\\']) {
+                return Err(EthornellError::Other("host_policy:130:0 launcher outside the game folder".into()));
+            }
+            let file = policy.open_resource(launcher).map_err(|e| EthornellError::Other(format!("host_policy:131:{}", e.raw_os_error().unwrap_or(0))))?;
+            if !manager.set_launcher_overlay(policy.resource.join(launcher), Box::new(file))? {
+                return Err(EthornellError::Other("launcher has no packed files".into()));
+            }
+            tracing::info!(launcher, files = manager.launcher_overlay().map_or(0, |o| o.files().len()), "launcher overlay");
+        }
         let bytes = manager.read_decoded_from_archive("system.arc", "ipl._bp")?;
         let mut runtime = file_policy::scope(&policy, || {
             snapshot::with_font(&font, || {
@@ -873,7 +893,7 @@ mod tests {
         let user = std::env::temp_dir().join(format!("ethornell-restricted-repro-user-{}", std::process::id()));
         std::fs::create_dir(&user).unwrap();
         let outcome = (|| -> Result<()> {
-            let mut host = HostRuntime::create(HostConfig {resource_root:resource,user_root:user.clone(),font_path:None,font_data:None,font_face_index:0,gbk:true,backend:0,strict:false,trace:false,silent:true})?;
+            let mut host = HostRuntime::create(HostConfig {resource_root:resource,user_root:user.clone(),font_path:None,font_data:None,font_face_index:0,gbk:true,backend:0,strict:false,trace:false,silent:true,launcher:None})?;
             // CPU-only VM/host-policy reproduction, not a Surface/GPU test.
             // It invokes the exact shared checked frontend under the same
             // scoped policy/font, with an explicit silent audio-free backend.
@@ -1079,9 +1099,39 @@ mod tests {
             strict: false,
             trace: false,
             silent: true,
+            launcher: None,
         })
         .unwrap();
         (root, runtime)
+    }
+    #[test]
+    #[cfg(unix)]
+    fn launcher_must_be_a_packed_executable_in_the_game_folder() {
+        let (root, host) = minimal_host("launcher");
+        drop(host);
+        std::fs::write(root.join("resource/plain.exe"), b"MZ not packed").unwrap();
+        let create = |launcher: &str| {
+            HostRuntime::create(HostConfig {
+                resource_root: root.join("resource"),
+                user_root: root.join("user"),
+                font_path: None,
+                font_data: None,
+                font_face_index: 0,
+                gbk: true,
+                backend: 0,
+                strict: false,
+                trace: false,
+                silent: true,
+                launcher: Some(launcher.into()),
+            })
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+        };
+        assert!(create("missing.exe").contains("host_policy:131:"));
+        assert!(create("../resource/plain.exe").contains("host_policy:130:"));
+        assert!(create("plain.exe").contains("no packed files"));
+        let _ = std::fs::remove_dir_all(root);
     }
     #[test]
     #[cfg(unix)]

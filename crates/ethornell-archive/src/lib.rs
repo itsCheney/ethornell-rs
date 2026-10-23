@@ -8,6 +8,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+pub mod evb;
+pub use evb::EvbOverlay;
+
 pub const MAGIC_PACK_FILE: &[u8] = b"PackFile";
 pub const MAGIC_PACK_FILE_FULL: &[u8] = b"PackFile    ";
 pub const MAGIC_BURIKO_ARC20: &[u8] = b"BURIKO ARC20";
@@ -192,6 +195,21 @@ impl ArchiveSource for fs::File {
     }
 }
 
+impl ArchiveSource for std::io::Cursor<Vec<u8>> {
+    fn byte_len(&mut self) -> std::io::Result<u64> {
+        Ok(self.get_ref().len() as u64)
+    }
+}
+
+/// Files that win over every archive, as loose files in the game folder do
+/// for BGI: the files packed into a patch's launcher executable.
+#[derive(Debug)]
+struct Overlay {
+    /// The executable; the `archive_path` of the overlay's entries.
+    path: PathBuf,
+    files: EvbOverlay,
+}
+
 #[derive(Debug)]
 struct ResourceManagerInner {
     limits: ResourceBudget,
@@ -211,6 +229,7 @@ struct ResourceManagerInner {
     archive_files: Vec<Mutex<Box<dyn ArchiveSource>>>,
     /// Search state the scripts configure at run time (Sys80:36/37/38).
     search: RwLock<RuntimeSearch>,
+    overlay: Option<Overlay>,
 }
 
 #[derive(Debug, Default)]
@@ -293,6 +312,7 @@ impl ResourceManager {
                 archive_by_path,
                 archive_files,
                 search: RwLock::default(),
+                overlay: None,
             }),
         })
     }
@@ -314,6 +334,47 @@ impl ResourceManager {
             files.push((path, file));
         }
         Self::from_authorized_files_with_limits(game.path().to_path_buf(), files, limits)
+    }
+
+    /// Makes the files packed into the launcher executable `source` (at
+    /// `path`) win over every archive entry of the same name. Returns false,
+    /// changing nothing, when it is not a packed executable. Only before the
+    /// manager is shared.
+    pub fn set_launcher_overlay(&mut self, path: PathBuf, source: Box<dyn ArchiveSource>) -> Result<bool> {
+        let max = self.inner.limits.max_decoded_bytes;
+        let Some(files) = EvbOverlay::open(source, max)? else {
+            return Ok(false);
+        };
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| EthornellError::Other("resource manager already shared".into()))?;
+        inner.overlay = Some(Overlay { path, files });
+        Ok(true)
+    }
+
+    /// The launcher executable's packed files, if one is set.
+    pub fn launcher_overlay(&self) -> Option<&EvbOverlay> {
+        self.inner.overlay.as_ref().map(|overlay| &overlay.files)
+    }
+
+    fn overlay_entry(&self, name: &str) -> Option<ResourceEntry> {
+        let overlay = self.inner.overlay.as_ref()?;
+        if name.trim().is_empty() {
+            return None;
+        }
+        let file = overlay.files.find(name)?;
+        Some(ResourceEntry {
+            archive_path: overlay.path.clone(),
+            entry_name: file.name.clone(),
+            packed_size: file.size,
+            unpacked_size: None,
+            flags: 0,
+        })
+    }
+
+    fn read_overlay(&self, entry: &ResourceEntry) -> Option<Result<Vec<u8>>> {
+        let overlay = self.inner.overlay.as_ref()?;
+        (entry.archive_path == overlay.path)
+            .then(|| overlay.files.read(&entry.entry_name).map(|bytes| bytes.as_ref().clone()))
     }
 
     pub fn limits(&self) -> ResourceBudget {
@@ -344,6 +405,9 @@ impl ResourceManager {
     }
 
     pub fn find(&self, name: &str) -> Option<ResourceEntry> {
+        if let Some(entry) = self.overlay_entry(name) {
+            return Some(entry);
+        }
         self.find_locator(name)
             .and_then(|(archive, entry)| self.entry_at(archive, entry))
     }
@@ -371,6 +435,9 @@ impl ResourceManager {
     }
 
     pub fn find_in_archive(&self, archive_name: &str, entry_name: &str) -> Option<ResourceEntry> {
+        if let Some(entry) = self.overlay_entry(entry_name) {
+            return Some(entry);
+        }
         self.find_locator_in_archive(archive_name, entry_name)
             .and_then(|(archive, entry)| self.entry_at(archive, entry))
     }
@@ -448,6 +515,9 @@ impl ResourceManager {
         archive_name: &str,
         entry_name: &str,
     ) -> Result<Vec<u8>> {
+        if let Some(entry) = self.overlay_entry(entry_name) {
+            return self.read_by_entry_decoded(&entry);
+        }
         let (archive_index, entry_index) = self
             .find_locator_in_archive(archive_name, entry_name)
             .ok_or_else(|| {
@@ -459,6 +529,9 @@ impl ResourceManager {
     }
 
     pub fn read_raw(&self, name: &str) -> Result<Vec<u8>> {
+        if let Some(entry) = self.overlay_entry(name) {
+            return self.read_by_entry_raw(&entry);
+        }
         let (archive_index, entry_index) = self.find_locator(name).ok_or_else(|| {
             EthornellError::Parse(format!("resource not found in game archives: {name}"))
         })?;
@@ -466,6 +539,9 @@ impl ResourceManager {
     }
 
     pub fn read_decoded(&self, name: &str) -> Result<Vec<u8>> {
+        if let Some(entry) = self.overlay_entry(name) {
+            return self.read_by_entry_decoded(&entry);
+        }
         let (archive_index, entry_index) = self.find_locator(name).ok_or_else(|| {
             EthornellError::Parse(format!("resource not found in game archives: {name}"))
         })?;
@@ -477,6 +553,9 @@ impl ResourceManager {
     }
 
     fn read_by_entry_bytes(&self, entry: &ResourceEntry, decoded: bool) -> Result<Vec<u8>> {
+        if let Some(bytes) = self.read_overlay(entry) {
+            return bytes;
+        }
         let archive_index = self.archive_index_for_path(&entry.archive_path)?;
         let key = normalize_resource_name(&entry.entry_name);
         let candidates = self.inner.by_name.get(&key).ok_or_else(|| {
@@ -529,6 +608,9 @@ impl ResourceManager {
     /// Read at most a stack header from the retained authorized archive FD;
     /// never reopen a checked path or allocate/decompress the whole resource.
     pub fn decoded_size_by_entry(&self,entry:&ResourceEntry)->Result<u64> {
+        if let Some(bytes) = self.read_overlay(entry) {
+            return Ok(decode_payload_owned(&entry.entry_name, bytes?, &self.inner.limits)?.len() as u64);
+        }
         let index=self.archive_index_for_path(&entry.archive_path)?;
         let archive=&self.inner.set.archives[index];
         let actual=archive.entries.iter().find(|e|e.name==entry.entry_name && e.packed_size==entry.packed_size).ok_or_else(||EthornellError::Parse("entry not indexed".into()))?;
@@ -1896,6 +1978,7 @@ mod tests {
                 archive_by_path,
                 archive_files: Vec::new(),
                 search: RwLock::default(),
+                overlay: None,
             }),
         };
 
@@ -1941,6 +2024,7 @@ mod tests {
                 archive_by_path,
                 archive_files: Vec::new(),
                 search: RwLock::default(),
+                overlay: None,
             }),
         }
     }

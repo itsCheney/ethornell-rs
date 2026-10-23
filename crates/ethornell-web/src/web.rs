@@ -219,6 +219,7 @@ impl WebEngine {
             strict: false,
             trace: false,
             silent,
+            launcher: None,
         })
         .map_err(message)?;
         Ok(Self { host, generation: 0 })
