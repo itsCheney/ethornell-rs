@@ -11131,6 +11131,11 @@ mod input_tests {
         assert_eq!(api.surface_text_states[&surface].scale_percent, 100);
         assert_eq!(api.surface_text_states[&surface].font_style, 1);
         assert_eq!(api.graph_config.text_global_properties[&0x8000_0000], 1);
+        let mut later_property = vec![Value::Int(0x8000_0004_u32 as i32), Value::Int(0)];
+        call_graph(&mut api, 0x91, 0x9a, &mut later_property).unwrap();
+        assert_eq!(api.graph_config.text_global_properties[&0x8000_0004], 0);
+        let mut unknown = vec![Value::Int(0x8000_0010_u32 as i32), Value::Int(0)];
+        assert!(call_graph(&mut api, 0x91, 0x9a, &mut unknown).is_err());
 
         // sub_42C870 refuses more than 800 and sub_484CD0 raises it.
         let mut invalid = vec![Value::Int(surface), Value::Int(801)];

@@ -1127,7 +1127,16 @@ impl RuntimeTraceApi {
                 // sub_485410 -> sub_434750.
                 let value = pop_int_value(stack).unwrap_or_default();
                 let property = pop_int_value(stack).unwrap_or_default() as u32;
-                if !matches!(property, 0 | 0x8000_0000 | 0x8000_0001 | 0x8000_0002) {
+                // Later builds (the HD edition of Wonderful Everyday sets
+                // 0x80000004 and 0x80000005 to 0) know more properties. They
+                // are kept but nothing reads them yet.
+                if (0x8000_0003..=0x8000_000F).contains(&property) {
+                    tracing::warn!(
+                        property = format_args!("0x{property:08X}"),
+                        value,
+                        "text global property of a later BGI build kept unused"
+                    );
+                } else if !matches!(property, 0 | 0x8000_0000 | 0x8000_0001 | 0x8000_0002) {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
                         "無効なファンクション番号 [ {} ] が指定されました",
                         property as i32
