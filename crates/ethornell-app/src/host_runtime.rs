@@ -690,6 +690,10 @@ impl HostRuntime {
         self.tick_remainder_ns = 0;
         self.sync_audio()
     }
+    /// The game's own screen size, which the renderer letterboxes.
+    pub fn screen_size(&self) -> (i32, i32) {
+        (self.runtime.api.screen_width, self.runtime.api.screen_height)
+    }
     pub fn poll_event(&mut self) -> Option<HostEvent> {
         self.runtime.api.host.events.pop_front()
     }

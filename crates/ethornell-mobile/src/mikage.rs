@@ -102,6 +102,31 @@ pub unsafe extern "C" fn ethornell_mikage_set_log_callback(
     });
 }
 
+/// The game's own screen size in its pixels (1280x720 until the game sets
+/// one). Status as for the ABI calls: 0, or a negative error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ethornell_mikage_screen_size(
+    handle: u64,
+    width: *mut u32,
+    height: *mut u32,
+) -> i32 {
+    if width.is_null() || height.is_null() {
+        return super::fail(super::ARG, "null output");
+    }
+    let mut size = (0, 0);
+    let status = super::with_session(handle, true, |runtime| {
+        size = runtime.screen_size();
+        Ok(())
+    });
+    if status == 0 {
+        unsafe {
+            *width = size.0.max(0) as u32;
+            *height = size.1.max(0) as u32;
+        }
+    }
+    status
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -12,6 +12,9 @@ typedef void (*EthornellMikageLogCallback)(int32_t level, const char *target, co
  * filter is a tracing EnvFilter directive; NULL keeps "ethornell=warn,wgpu=warn".
  * Only the first call's filter takes effect. */
 void ethornell_mikage_set_log_callback(EthornellMikageLogCallback callback, const char *filter);
+/* The game's own screen size in its pixels (1280x720 until the game sets one).
+ * Returns 0, or a negative ABI status. */
+int32_t ethornell_mikage_screen_size(uint64_t handle, uint32_t *width, uint32_t *height);
 #ifdef __cplusplus
 }
 #endif
