@@ -11131,6 +11131,15 @@ mod input_tests {
         assert_eq!(api.surface_text_states[&surface].scale_percent, 100);
         assert_eq!(api.surface_text_states[&surface].font_style, 1);
         assert_eq!(api.graph_config.text_global_properties[&0x8000_0000], 1);
+        // BGI 1.647 renderer switches set by the HD edition's ipl._bp.
+        let mut switch = vec![Value::Int(0)];
+        assert!(matches!(call_graph(&mut api, 0x91, 0x00, &mut switch), Ok(Value::None)));
+        assert!(switch.is_empty());
+        let mut option = vec![Value::Int(0x0122_0000), Value::Int(1)];
+        assert!(matches!(call_graph(&mut api, 0x91, 0x0a, &mut option), Ok(Value::Int(1))));
+        let mut option = vec![Value::Int(7), Value::Int(1)];
+        assert!(matches!(call_graph(&mut api, 0x91, 0x0a, &mut option), Ok(Value::Int(0))));
+        assert!(option.is_empty());
         let mut later_property = vec![Value::Int(0x8000_0004_u32 as i32), Value::Int(0)];
         call_graph(&mut api, 0x91, 0x9a, &mut later_property).unwrap();
         assert_eq!(api.graph_config.text_global_properties[&0x8000_0004], 0);

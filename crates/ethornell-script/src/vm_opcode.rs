@@ -513,6 +513,16 @@ pub const BP_OPCODE_SPECS: &[BpOpcodeSpec] = &[
         confidence: "medium",
         evidence: "current VM implementation",
     },
+    // 0x55 fixed_pow: Raise a 16.16 value to a 16.16 power (BGI 1.647).
+    BpOpcodeSpec {
+        code: 0x55,
+        symbol: "fixed_pow",
+        stack_effect: "2 -> 1",
+        immediate: "none",
+        description: "Raise a 16.16 value to a 16.16 power.",
+        confidence: "high",
+        evidence: "BGI 1.647 (Wonderful Everyday HD) interpreter table 0x50E320, handler 0x47C350",
+    },
     // 0x56 fixed_mul: Multiply two 16.16 fixed-point values.
     BpOpcodeSpec {
         code: 0x56,

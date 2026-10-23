@@ -297,7 +297,7 @@ fn builtin_stack_effect(name: &str) -> Option<(usize, usize)> {
         "atan2" | "strfind" | "streq" => (2, 1),
         "vec3_length" | "memory_equal" => (3, 1),
         "qword_add" | "qword_sub" | "qword_mul" | "qword_div" | "qword_mod" => (3, 0),
-        "fixed_mul" | "fixed_div" => (2, 1),
+        "fixed_pow" | "fixed_mul" | "fixed_div" => (2, 1),
         "vec4_add" | "vec4_sub" | "vec4_mul" | "vec4_div" | "vec4_scale" | "vec4_div_scalar" => {
             (3, 0)
         }

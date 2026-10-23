@@ -3650,7 +3650,7 @@ impl Vm {
                 self.execute_qword_arithmetic(code)?;
             }
             BpOpcode::Known {
-                name: "fixed_mul" | "fixed_div",
+                name: "fixed_pow" | "fixed_mul" | "fixed_div",
                 ..
             } => {
                 let value = self.execute_fixed_arithmetic(code)?;

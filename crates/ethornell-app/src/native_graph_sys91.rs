@@ -242,6 +242,19 @@ impl RuntimeTraceApi {
             0x03 => {
                 unreachable!("0x91:03 is handled by the VM binary-cache pointer bridge")
             }
+            // BGI 1.647 only (0x488AC0): stores one int in a global that
+            // nothing ethornell draws reads.
+            0x00 => {
+                let _ = pop_int_value(stack);
+                ethornell_vm::Value::None
+            }
+            // BGI 1.647 only (0x488B90 -> 0x407F30): sets renderer option
+            // 0x01220000 or 0x80111600 and returns 1, any other key returns 0.
+            0x0a => {
+                let _value = pop_int_value(stack);
+                let key = pop_int_value(stack).unwrap_or_default() as u32;
+                ethornell_vm::Value::Int(i32::from(matches!(key, 0x0122_0000 | 0x8011_1600)))
+            }
             0x06 => {
                 // sub_4806D0 pops Y first and X second.
                 let y = pop_int_value(stack).unwrap_or_default();
