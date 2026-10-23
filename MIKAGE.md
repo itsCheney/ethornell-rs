@@ -14,6 +14,7 @@ a few small commits:
 - The user root may sit directly inside the resource root (Mikage keeps saves
   in `<game>/savedata`). That directory is then invisible to resource reads,
   listings and the archive scan (`file_policy.rs`).
+- No GitHub workflows: upstream's CI and releases don't run on this fork; Mikage builds the library in its own CI.
 - `ethornell_mikage_screen_size`: the game's own screen size, for the host's layout.
 - `ethornell_mikage_set_log_callback` (`crates/ethornell-mobile/src/mikage.rs`,
   `platform/ios/include/ethornell_mikage.h`): engine warnings, errors and panic
