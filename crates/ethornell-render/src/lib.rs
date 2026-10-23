@@ -1,7 +1,7 @@
 //! Shared draw/text API with desktop wgpu and native console GPU presenters.
 mod font;
 mod shared;
-pub use font::FontProvider;
+pub use font::{FallbackFont, FontProvider};
 pub(crate) use shared::SYSTEM_CJK_FONT_CANDIDATES;
 pub use shared::{
     PresentationScale, RenderCommand, TextGlow, TextStyleSpan, TextureHandle, load_system_cjk_font,

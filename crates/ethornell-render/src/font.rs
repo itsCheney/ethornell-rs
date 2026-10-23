@@ -1,4 +1,4 @@
-use ab_glyph::{Font, FontArc, FontVec};
+use ab_glyph::{Font, FontArc, FontVec, GlyphId, Outline, OutlineCurve, Point, Rect, v2};
 use ethornell_core::{EthornellError, Result};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -73,9 +73,173 @@ impl FontProvider {
     }
 }
 
+/// A font that draws what `primary` has, and the characters it lacks with
+/// `fallback`, scaled to `primary`'s em. A game's own font (often a patch's
+/// font for its remapped codes) covers the script but rarely the menus,
+/// names and symbols the host font has.
+///
+/// Fallback glyphs are numbered after the primary's; metrics, kerning
+/// between primary glyphs, `codepoint_ids` and `font_data` are the
+/// primary's.
+pub struct FallbackFont {
+    primary: FontArc,
+    fallback: FontArc,
+    offset: u32,
+    scale: f32,
+}
+
+impl FallbackFont {
+    pub fn new(primary: FontArc, fallback: FontArc) -> FontArc {
+        let scale = match (primary.units_per_em(), fallback.units_per_em()) {
+            (Some(primary), Some(fallback)) if fallback > 0.0 => primary / fallback,
+            _ => 1.0,
+        };
+        let offset = primary.glyph_count() as u32;
+        FontArc::new(Self { primary, fallback, offset, scale })
+    }
+
+    /// The fallback glyph behind `id`, if it is one.
+    fn fallback_id(&self, id: GlyphId) -> Option<GlyphId> {
+        (id.0 as u32 >= self.offset).then(|| GlyphId((id.0 as u32 - self.offset) as u16))
+    }
+
+    fn scaled(&self, point: Point) -> Point {
+        Point { x: point.x * self.scale, y: point.y * self.scale }
+    }
+}
+
+impl Font for FallbackFont {
+    fn units_per_em(&self) -> Option<f32> {
+        self.primary.units_per_em()
+    }
+    fn ascent_unscaled(&self) -> f32 {
+        self.primary.ascent_unscaled()
+    }
+    fn descent_unscaled(&self) -> f32 {
+        self.primary.descent_unscaled()
+    }
+    fn line_gap_unscaled(&self) -> f32 {
+        self.primary.line_gap_unscaled()
+    }
+    fn italic_angle(&self) -> f32 {
+        self.primary.italic_angle()
+    }
+    fn glyph_id(&self, c: char) -> GlyphId {
+        let id = self.primary.glyph_id(c);
+        if id.0 != 0 {
+            return id;
+        }
+        let id = self.fallback.glyph_id(c);
+        match u16::try_from(self.offset + id.0 as u32) {
+            Ok(combined) if id.0 != 0 => GlyphId(combined),
+            _ => GlyphId(0),
+        }
+    }
+    fn h_advance_unscaled(&self, id: GlyphId) -> f32 {
+        match self.fallback_id(id) {
+            Some(id) => self.fallback.h_advance_unscaled(id) * self.scale,
+            None => self.primary.h_advance_unscaled(id),
+        }
+    }
+    fn h_side_bearing_unscaled(&self, id: GlyphId) -> f32 {
+        match self.fallback_id(id) {
+            Some(id) => self.fallback.h_side_bearing_unscaled(id) * self.scale,
+            None => self.primary.h_side_bearing_unscaled(id),
+        }
+    }
+    fn v_advance_unscaled(&self, id: GlyphId) -> f32 {
+        match self.fallback_id(id) {
+            Some(id) => self.fallback.v_advance_unscaled(id) * self.scale,
+            None => self.primary.v_advance_unscaled(id),
+        }
+    }
+    fn v_side_bearing_unscaled(&self, id: GlyphId) -> f32 {
+        match self.fallback_id(id) {
+            Some(id) => self.fallback.v_side_bearing_unscaled(id) * self.scale,
+            None => self.primary.v_side_bearing_unscaled(id),
+        }
+    }
+    fn kern_unscaled(&self, first: GlyphId, second: GlyphId) -> f32 {
+        match (self.fallback_id(first), self.fallback_id(second)) {
+            (None, None) => self.primary.kern_unscaled(first, second),
+            (Some(first), Some(second)) => self.fallback.kern_unscaled(first, second) * self.scale,
+            _ => 0.0,
+        }
+    }
+    fn outline(&self, id: GlyphId) -> Option<Outline> {
+        let Some(id) = self.fallback_id(id) else {
+            return self.primary.outline(id);
+        };
+        let outline = self.fallback.outline(id)?;
+        Some(Outline {
+            bounds: Rect { min: self.scaled(outline.bounds.min), max: self.scaled(outline.bounds.max) },
+            curves: outline
+                .curves
+                .into_iter()
+                .map(|curve| match curve {
+                    OutlineCurve::Line(a, b) => OutlineCurve::Line(self.scaled(a), self.scaled(b)),
+                    OutlineCurve::Quad(a, b, c) => {
+                        OutlineCurve::Quad(self.scaled(a), self.scaled(b), self.scaled(c))
+                    }
+                    OutlineCurve::Cubic(a, b, c, d) => OutlineCurve::Cubic(
+                        self.scaled(a),
+                        self.scaled(b),
+                        self.scaled(c),
+                        self.scaled(d),
+                    ),
+                })
+                .collect(),
+        })
+    }
+    fn glyph_count(&self) -> usize {
+        (self.offset as usize + self.fallback.glyph_count()).min(u16::MAX as usize + 1)
+    }
+    fn codepoint_ids(&self) -> ab_glyph::CodepointIdIter<'_> {
+        self.primary.codepoint_ids()
+    }
+    fn glyph_raster_image2(&self, id: GlyphId, pixel_size: u16) -> Option<v2::GlyphImage<'_>> {
+        match self.fallback_id(id) {
+            Some(id) => self.fallback.glyph_raster_image2(id, pixel_size),
+            None => self.primary.glyph_raster_image2(id, pixel_size),
+        }
+    }
+    fn font_data(&self) -> &[u8] {
+        self.primary.font_data()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_font_draws_what_the_primary_lacks() {
+        let path = super::super::SYSTEM_CJK_FONT_CANDIDATES
+            .iter()
+            .find(|path| Path::new(path).is_file())
+            .expect("system font file");
+        let system = FontProvider::load_file(path, 0).unwrap();
+        // Every character the primary has is drawn with the primary.
+        let font = FallbackFont::new(system.clone(), system.clone());
+        let a = font.glyph_id('A');
+        assert_eq!(a, system.glyph_id('A'));
+        assert_eq!(font.h_advance_unscaled(a), system.h_advance_unscaled(a));
+        assert_eq!(font.glyph_id('\u{10ffff}'), GlyphId(0));
+
+        let wrapper = FallbackFont {
+            primary: system.clone(),
+            fallback: system.clone(),
+            offset: 0,
+            scale: 0.5,
+        };
+        // With offset 0 every glyph is a fallback glyph at half size.
+        let id = system.glyph_id('中');
+        assert_eq!(wrapper.h_advance_unscaled(id), system.h_advance_unscaled(id) * 0.5);
+        let outline = wrapper.outline(id).unwrap();
+        let original = system.outline(id).unwrap();
+        assert_eq!(outline.bounds.max.x, original.bounds.max.x * 0.5);
+        assert_eq!(outline.curves.len(), original.curves.len());
+    }
 
     #[test]
     fn invalid_font_and_face_fail_explicitly() {

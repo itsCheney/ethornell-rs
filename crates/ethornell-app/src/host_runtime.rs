@@ -58,6 +58,9 @@ pub struct HostConfig {
     /// precedence over `font_path`.
     pub font_data: Option<Vec<u8>>,
     pub font_face_index: u32,
+    /// A font file and face for the characters the text font lacks (see
+    /// `FallbackFont`), e.g. the host's font behind a game's own font.
+    pub fallback_font: Option<(PathBuf, u32)>,
     pub gbk: bool,
     pub backend: u32,
     pub strict: bool,
@@ -181,6 +184,13 @@ impl HostRuntime {
             (Some(bytes), _) => ethornell_render::FontProvider::load_bytes(bytes, config.font_face_index)?,
             (None, Some(path)) => ethornell_render::FontProvider::load_file(path, config.font_face_index)?,
             (None, None) => ethornell_render::FontProvider::load_system_for_text(if config.gbk {"A日本語中文简体繁體"} else {"A日本語中文"})?,
+        };
+        let font = match &config.fallback_font {
+            Some((path, face)) => ethornell_render::FallbackFont::new(
+                font,
+                ethornell_render::FontProvider::load_file(path, *face)?,
+            ),
+            None => font,
         };
         #[cfg_attr(not(fd_policy), allow(unused_mut))]
         let mut manager = policy.open_manager()?;
@@ -893,7 +903,7 @@ mod tests {
         let user = std::env::temp_dir().join(format!("ethornell-restricted-repro-user-{}", std::process::id()));
         std::fs::create_dir(&user).unwrap();
         let outcome = (|| -> Result<()> {
-            let mut host = HostRuntime::create(HostConfig {resource_root:resource,user_root:user.clone(),font_path:None,font_data:None,font_face_index:0,gbk:true,backend:0,strict:false,trace:false,silent:true,launcher:None})?;
+            let mut host = HostRuntime::create(HostConfig {resource_root:resource,user_root:user.clone(),font_path:None,font_data:None,font_face_index:0,fallback_font:None,gbk:true,backend:0,strict:false,trace:false,silent:true,launcher:None})?;
             // CPU-only VM/host-policy reproduction, not a Surface/GPU test.
             // It invokes the exact shared checked frontend under the same
             // scoped policy/font, with an explicit silent audio-free backend.
@@ -1094,6 +1104,7 @@ mod tests {
             font_path: None,
             font_data: None,
             font_face_index: 0,
+            fallback_font: None,
             gbk: true,
             backend: 0,
             strict: false,
@@ -1117,6 +1128,7 @@ mod tests {
                 font_path: None,
                 font_data: None,
                 font_face_index: 0,
+                fallback_font: None,
                 gbk: true,
                 backend: 0,
                 strict: false,

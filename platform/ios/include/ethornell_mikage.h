@@ -21,6 +21,11 @@ int32_t ethornell_mikage_screen_size(uint64_t handle, uint32_t *width, uint32_t 
  * they do on Windows. NULL or "" clears it; create uses it once. Returns 0, or
  * a negative ABI status. */
 int32_t ethornell_mikage_set_launcher(const char *name);
+/* A font file (and TTC face) for the next ethornell_ios_create on this thread
+ * that draws the characters the config's font lacks, scaled to its em: with a
+ * game's own font as config font_path, the host's font behind it. NULL or ""
+ * clears it; create uses it once. Returns 0, or a negative ABI status. */
+int32_t ethornell_mikage_set_fallback_font(const char *path, uint32_t face);
 #ifdef __cplusplus
 }
 #endif

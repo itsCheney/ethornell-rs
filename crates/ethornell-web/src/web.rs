@@ -214,6 +214,7 @@ impl WebEngine {
             font_path: None,
             font_data: Some(font),
             font_face_index: 0,
+            fallback_font: None,
             gbk,
             backend: 0,
             strict: false,

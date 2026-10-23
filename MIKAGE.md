@@ -22,6 +22,10 @@ a few small commits:
   an aPLib unpacker) win over every archive entry of the same name, as loose
   files in the game folder do on Windows. They are read from the exe on
   demand; nothing is extracted.
+- Fallback font: `ethornell_mikage_set_fallback_font` puts a second font behind
+  the config's font (`FallbackFont` in `crates/ethornell-render/src/font.rs`),
+  so a game's own font can draw the text and the host's font whatever it lacks.
+  Chinese patches often re-code the text into codes their own font draws.
 - No GitHub workflows: upstream's CI and releases don't run on this fork; Mikage builds the library in its own CI.
 - `ethornell_mikage_screen_size`: the game's own screen size, for the host's layout.
 - `ethornell_mikage_set_log_callback` (`crates/ethornell-mobile/src/mikage.rs`,

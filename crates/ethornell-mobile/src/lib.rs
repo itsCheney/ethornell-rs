@@ -363,6 +363,7 @@ pub unsafe extern "C" fn ethornell_android_create(config: *const ConfigV1, out: 
             },
             font_data: None,
             font_face_index: config.font_face_index,
+            fallback_font: mikage::take_fallback_font(),
             gbk: config.text_encoding == 1,
             backend: config.backend,
             strict: config.flags & 1 != 0,

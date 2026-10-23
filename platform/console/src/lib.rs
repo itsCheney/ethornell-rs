@@ -69,6 +69,7 @@ pub unsafe extern "C" fn ethornell_console_create(
             font_path: Some(font),
             font_data: None,
             font_face_index: 0,
+            fallback_font: None,
             gbk: false,
             backend: 0,
             strict: true,

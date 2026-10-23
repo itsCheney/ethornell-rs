@@ -1,6 +1,9 @@
 //! Calls added for the Mikage player (itsCheney/Mikage-Next), next to the
 //! host ABI. They don't change any ABI v1 behaviour.
 //!
+//! `ethornell_mikage_set_fallback_font` puts a second font behind the
+//! config's font (`FallbackFont`), for a game's own font.
+//!
 //! `ethornell_mikage_set_launcher` starts the next session with a patch's
 //! launcher executable (see `HostConfig::launcher`).
 //!
@@ -107,6 +110,29 @@ pub unsafe extern "C" fn ethornell_mikage_set_log_callback(
 
 thread_local! {
     static LAUNCHER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static FALLBACK_FONT: std::cell::RefCell<Option<(std::path::PathBuf, u32)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A font file and face for the next `ethornell_ios_create` on this thread
+/// that draws the characters the config's font lacks: with a game's own
+/// font as the config font, the host's font behind it. NULL or empty
+/// clears it; create uses it once. Status 0, or a negative error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ethornell_mikage_set_fallback_font(path: *const c_char, face: u32) -> i32 {
+    let path = (!path.is_null())
+        .then(|| unsafe { std::ffi::CStr::from_ptr(path) }.to_str().map(str::to_owned));
+    let font = match path {
+        Some(Ok(path)) => Some(path).filter(|path| !path.is_empty()).map(|path| (path.into(), face)),
+        Some(Err(_)) => return super::fail(super::ARG, "font path is not UTF-8"),
+        None => None,
+    };
+    FALLBACK_FONT.with(|fallback| *fallback.borrow_mut() = font);
+    0
+}
+
+pub(crate) fn take_fallback_font() -> Option<(std::path::PathBuf, u32)> {
+    FALLBACK_FONT.with(|fallback| fallback.borrow_mut().take())
 }
 
 /// The launcher executable for the next `ethornell_ios_create` on this
