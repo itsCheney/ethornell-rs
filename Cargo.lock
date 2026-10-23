@@ -1248,6 +1248,8 @@ dependencies = [
  "ethornell-app",
  "jni 0.21.1",
  "ndk-context",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

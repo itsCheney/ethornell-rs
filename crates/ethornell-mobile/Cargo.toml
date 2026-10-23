@@ -14,6 +14,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 ethornell-app = { path = "../ethornell-app", default-features = false, features = ["host-driven"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1"

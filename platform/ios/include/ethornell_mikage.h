@@ -1,0 +1,18 @@
+#ifndef ETHORNELL_MIKAGE_H
+#define ETHORNELL_MIKAGE_H
+#include <stdint.h>
+/* Calls the Mikage player adds next to the host ABI (see MIKAGE.md). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* level: 1 error, 2 warn, 3 info, 4 debug, 5 trace. Strings are UTF-8, NUL
+ * terminated and valid only during the call, which can come from any thread. */
+typedef void (*EthornellMikageLogCallback)(int32_t level, const char *target, const char *message);
+/* Forwards engine log events and panic messages to callback (NULL stops).
+ * filter is a tracing EnvFilter directive; NULL keeps "ethornell=warn,wgpu=warn".
+ * Only the first call's filter takes effect. */
+void ethornell_mikage_set_log_callback(EthornellMikageLogCallback callback, const char *filter);
+#ifdef __cplusplus
+}
+#endif
+#endif

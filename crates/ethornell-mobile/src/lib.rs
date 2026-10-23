@@ -5,6 +5,7 @@
 mod ios;
 #[cfg(target_os = "android")]
 mod android_jni;
+mod mikage;
 use ethornell_app::host_runtime::{HostConfig, HostRuntime};
 use std::{
     cell::RefCell,
