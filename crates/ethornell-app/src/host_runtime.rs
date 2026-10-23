@@ -142,6 +142,7 @@ impl HostServices {
         if !self.enabled {
             return;
         }
+        tracing::warn!(capability, "unsupported or denied host capability");
         self.fatal = Some(format!(
             "unsupported or denied host capability: {capability}"
         ));
@@ -654,6 +655,9 @@ impl HostRuntime {
     pub fn step(&mut self, now: u64) -> Result<()> {
         self.scope(|this| {
             this.step_inner(now).map_err(|error| {
+                // The ABI message is redacted to a class; the engine log
+                // keeps the full reason for diagnostics.
+                tracing::warn!(%error, "runtime step failed");
                 let report = this.runtime.last_report.as_ref();
                 let reason = report
                     .map(|r| match r.stop_reason {
