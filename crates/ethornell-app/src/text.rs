@@ -340,11 +340,8 @@ impl RuntimeTraceApi {
     ) -> Option<(i32, (i32, i32))> {
         let link_color = (self.system92_text_render_override != -1)
             .then(|| (self.system92_text_render_override as u32) & 0x00ff_ffff);
-        let parsed = parse_message_markup_with(
-            raw_text,
-            &mut self.graph_defaults.ruby_registry,
-            link_color,
-        );
+        let parsed =
+            parse_message_markup_with(raw_text, &mut self.graph_defaults.ruby_registry, link_color);
         let mut image = self.graph_bitmap_image(bitmap)?;
         let params = crate::text_layout::LayoutParams {
             x: x as f32,
@@ -402,7 +399,10 @@ impl RuntimeTraceApi {
             return None;
         }
         self.clear_bitmap_text(bitmap);
-        Some((layout.lines, (layout.end_x.round() as i32, layout.end_y.round() as i32)))
+        Some((
+            layout.lines,
+            (layout.end_x.round() as i32, layout.end_y.round() as i32),
+        ))
     }
 
     /// `Graph91:9C` / `Graph91:9D` (`sub_484A30`, `sub_484C40`): draw markup text
@@ -421,7 +421,11 @@ impl RuntimeTraceApi {
         args: &[ethornell_vm::Value],
         shift: usize,
     ) -> ethornell_vm::VmResult<i32> {
-        let at = |index: usize| args.get(index + shift).map(value_to_i32).unwrap_or_default();
+        let at = |index: usize| {
+            args.get(index + shift)
+                .map(value_to_i32)
+                .unwrap_or_default()
+        };
         let target = at(13);
         let fail = |text: String| Err(ethornell_vm::VmError::Runtime(text));
         crate::target_checks::bitmap(target)?;
@@ -430,7 +434,9 @@ impl RuntimeTraceApi {
             return fail(format!("無効なフォント番号 [ {font} ] が指定されました"));
         }
         if ethornell_vm::GraphApi::query_bitmap_info(self, target).is_none() {
-            return fail(format!("指定されたビットマップ [ {target} ] は存在しません"));
+            return fail(format!(
+                "指定されたビットマップ [ {target} ] は存在しません"
+            ));
         }
         if !(4..=200).contains(&at(6)) {
             return fail(format!("指定されたフォントサイズ [ {} ] は無効です", at(6)));
@@ -856,7 +862,6 @@ impl RuntimeTraceApi {
         let glyph = state.font_size.round().max(1.0) as i32;
         let pitch = glyph + glyph * spacing_percent / 100;
 
-
         for node in self.item_grid_nodes.remove(&window).unwrap_or_default() {
             self.text_nodes.remove(&node);
         }
@@ -864,15 +869,27 @@ impl RuntimeTraceApi {
 
         let mut nodes = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
-            let item_color = self.graph_item_selection_column_layouts.get(&window).map_or(color, |colors| colors[index]);
-            let color = [((item_color >> 16) & 255) as f32 / 255.0, ((item_color >> 8) & 255) as f32 / 255.0, (item_color & 255) as f32 / 255.0, 1.0];
+            let item_color = self
+                .graph_item_selection_column_layouts
+                .get(&window)
+                .map_or(color, |colors| colors[index]);
+            let color = [
+                ((item_color >> 16) & 255) as f32 / 255.0,
+                ((item_color >> 8) & 255) as f32 / 255.0,
+                (item_color & 255) as f32 / 255.0,
+                1.0,
+            ];
             let index = index as i32;
             let column = index % columns;
             let column_left = left + column * area_width / columns;
             let width: i32 = item
                 .chars()
                 .map(|ch| {
-                    let double_byte = encoding_rs::SHIFT_JIS.encode(ch.encode_utf8(&mut [0; 4])).0.len() > 1;
+                    let double_byte = encoding_rs::SHIFT_JIS
+                        .encode(ch.encode_utf8(&mut [0; 4]))
+                        .0
+                        .len()
+                        > 1;
                     if double_byte { glyph } else { glyph / 2 }
                 })
                 .sum();
@@ -908,7 +925,13 @@ impl RuntimeTraceApi {
             );
             nodes.push(node);
         }
-        tracing::debug!(window, items = items.len(), columns, centered, "GraphDrawItemSelectionGrid");
+        tracing::debug!(
+            window,
+            items = items.len(),
+            columns,
+            centered,
+            "GraphDrawItemSelectionGrid"
+        );
         self.item_grid_nodes.insert(window, nodes);
         true
     }
@@ -1106,7 +1129,11 @@ impl RuntimeTraceApi {
     /// top-left, vertical ones (variant 1) at its top-right.
     pub(crate) fn reset_window_text_cursor(&mut self, target: i32) {
         if let Some(surface) = self.graph_surfaces.get(&target) {
-            let x = if surface.message_variant == 1 { surface.valid_right } else { surface.valid_left };
+            let x = if surface.message_variant == 1 {
+                surface.valid_right
+            } else {
+                surface.valid_left
+            };
             let state = self.surface_text_states.entry(target).or_default();
             state.cursor_x = x;
             state.cursor_y = surface.valid_top;

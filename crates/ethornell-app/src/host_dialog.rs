@@ -417,7 +417,11 @@ fn show_message_platform(
         MessageDialogKind::OkCancel => ("OK", "Cancel"),
         MessageDialogKind::RetryCancel => ("Retry", "Quit"),
     };
-    let default = if default_first || second.is_empty() { first } else { second };
+    let default = if default_first || second.is_empty() {
+        first
+    } else {
+        second
+    };
     let buttons = if second.is_empty() {
         format!(r#"buttons {{"{first}"}} default button "{first}""#)
     } else {
@@ -581,7 +585,11 @@ fn truncate_shift_jis(text: &str, max_bytes: usize) -> String {
     output
 }
 
-pub(crate) fn constrain_text(text: &str, max_bytes: usize, constraint: TextInputConstraint) -> String {
+pub(crate) fn constrain_text(
+    text: &str,
+    max_bytes: usize,
+    constraint: TextInputConstraint,
+) -> String {
     let filtered = match constraint {
         TextInputConstraint::Any => text.to_string(),
         TextInputConstraint::SignedDecimal => {
@@ -1069,6 +1077,8 @@ fn set_wallpaper_platform(path: &str, style: i32, _tile: i32) -> bool {
 }
 
 pub(crate) fn set_wallpaper(path: &str, style: i32, tile: i32) -> bool {
-    if super::file_policy::restricted() || host_dialogs_suppressed() { return false; }
+    if super::file_policy::restricted() || host_dialogs_suppressed() {
+        return false;
+    }
     set_wallpaper_platform(path, style, tile)
 }

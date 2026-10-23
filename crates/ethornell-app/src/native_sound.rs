@@ -105,7 +105,10 @@ impl RuntimeTraceApi {
                     .and_then(|()| target_checks::volume(volume))
                     .and_then(|()| target_checks::bgm_channel(channel))
                     .and_then(|()| {
-                        self.native_bgm_asset_check(&[(&archive, &file)], &format!("{archive} : {file}"))
+                        self.native_bgm_asset_check(
+                            &[(&archive, &file)],
+                            &format!("{archive} : {file}"),
+                        )
                     })
                 {
                     return Some(Err(error));
@@ -132,7 +135,11 @@ impl RuntimeTraceApi {
                 // sub_487D80: pan, volume, channel, then 12/14 for either
                 // stream.
                 let label = format!("{archive} : {intro_file} / {loop_file}");
-                let loop_name = if loop_file.is_empty() { &intro_file } else { &loop_file };
+                let loop_name = if loop_file.is_empty() {
+                    &intro_file
+                } else {
+                    &loop_file
+                };
                 if let Err(error) = target_checks::pan(pan)
                     .and_then(|()| target_checks::volume(volume))
                     .and_then(|()| target_checks::bgm_channel(channel))
@@ -760,7 +767,8 @@ impl RuntimeTraceApi {
                     ethornell_audio::probe_audio(&asset.bytes).kind,
                     ethornell_audio::AudioKind::Ogg | ethornell_audio::AudioKind::RiffWave
                 )
-                || ethornell_audio::probe_audio(&asset.bytes).kind == ethornell_audio::AudioKind::Unknown
+                || ethornell_audio::probe_audio(&asset.bytes).kind
+                    == ethornell_audio::AudioKind::Unknown
             {
                 return Err(ethornell_vm::VmError::Runtime(format!(
                     "指定されたファイル [ {label} ] はBWファイルではないようです"
@@ -854,7 +862,11 @@ impl RuntimeTraceApi {
         };
         native_mixer_volume([
             // sub_494F50 applies 0 to every primary bank while minimized.
-            if self.sound_minimize_muted { 0 } else { self.bgm_primary_volumes[index] },
+            if self.sound_minimize_muted {
+                0
+            } else {
+                self.bgm_primary_volumes[index]
+            },
             self.bgm_secondary_volumes[index],
             self.bgm_play_volumes[index],
             self.bgm_fade_volumes[index],
@@ -933,7 +945,11 @@ impl RuntimeTraceApi {
             return [0; 4];
         };
         [
-            if self.sound_minimize_muted { 0 } else { self.sound_primary_volumes[index] },
+            if self.sound_minimize_muted {
+                0
+            } else {
+                self.sound_primary_volumes[index]
+            },
             self.sound_secondary_volumes[index],
             self.sound_play_volumes[index],
             self.sound_fade_volumes[index],
@@ -1207,7 +1223,6 @@ impl RuntimeTraceApi {
         let value = f64::from(samples) * 1000.0 / f64::from(frequency) * f64::from(scale);
         ((value as i64 as u32) >> 16) as i32
     }
-
 }
 
 const NATIVE_CD_AUDIO_CHANNEL: i32 = 0x1FE;
@@ -1216,11 +1231,15 @@ const NATIVE_CD_AUDIO_EXTENSIONS: &[&str] = &["ogg", "wav"];
 fn discover_native_cd_audio_tracks(
     manager: &ethornell_archive::ResourceManager,
 ) -> std::collections::BTreeMap<u8, AudioAsset> {
-    if file_policy::restricted() {return std::collections::BTreeMap::new();}
+    if file_policy::restricted() {
+        return std::collections::BTreeMap::new();
+    }
     let mut tracks = std::collections::BTreeMap::new();
     let root = game_root_path(manager);
     let mut directories = Vec::new();
-    if !file_policy::restricted() && let Some(path) = std::env::var_os("ETHORNELL_CD_AUDIO_ROOT") {
+    if !file_policy::restricted()
+        && let Some(path) = std::env::var_os("ETHORNELL_CD_AUDIO_ROOT")
+    {
         directories.push(std::path::PathBuf::from(path));
     }
     for relative in ["cdda", "CDDA", "cd", "CD", "audio/cdda", "Audio/CDDA"] {
@@ -1255,10 +1274,14 @@ fn discover_native_cd_audio_tracks(
             else {
                 continue;
             };
-            let bytes = if let Some(policy)=file_policy::active() {
-                let Some(rel)=path.strip_prefix(&policy.resource).ok() else {continue;};
-                policy.read_resource(&rel.to_string_lossy(), 128*1024*1024)
-            } else {std::fs::read(&path)};
+            let bytes = if let Some(policy) = file_policy::active() {
+                let Some(rel) = path.strip_prefix(&policy.resource).ok() else {
+                    continue;
+                };
+                policy.read_resource(&rel.to_string_lossy(), 128 * 1024 * 1024)
+            } else {
+                std::fs::read(&path)
+            };
             let Ok(bytes) = bytes else {
                 continue;
             };

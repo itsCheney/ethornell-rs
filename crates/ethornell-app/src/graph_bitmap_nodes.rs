@@ -165,13 +165,22 @@ impl RuntimeTraceApi {
         // sub_4033A0 creates the destination in the source's format and
         // copies with mode 0x80 at (-x, -y): a raw row copy (sub_40ADF0).
         let format = source_info.format as i32;
-        crate::bitmap_blend::blit_copy(&mut destination_image, format, &source_image, format, -x, -y);
+        crate::bitmap_blend::blit_copy(
+            &mut destination_image,
+            format,
+            &source_image,
+            format,
+            -x,
+            -y,
+        );
 
         self.recreate_native_bitmap(destination, width, height, format);
         // Formats 4 and 6 keep their samples in the effect maps; the raw copy
         // moves those samples as well.
         match format {
-            4 => self.effects.create_displacement_map(destination, width, height),
+            4 => self
+                .effects
+                .create_displacement_map(destination, width, height),
             6 => self.effects.create_vector_map(destination, width, height),
             _ => {}
         }

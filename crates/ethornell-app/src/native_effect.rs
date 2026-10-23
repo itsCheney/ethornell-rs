@@ -435,7 +435,10 @@ impl RuntimeTraceApi {
                         .get_mut(&a[0])
                         .ok_or_else(handle_error)?;
                     if a[1] as u32 > 100 {
-                        return Err(fail(format!("無効な処理間隔 [ {} ] が指定されました", a[1])));
+                        return Err(fail(format!(
+                            "無効な処理間隔 [ {} ] が指定されました",
+                            a[1]
+                        )));
                     }
                     s.emission_percent = a[1];
                     s.world.interval = a[1] as u32;
@@ -545,7 +548,9 @@ impl RuntimeTraceApi {
                         }
                     }
                     if kind as u32 >= 2 || id == 26 && kind != 1 {
-                        return Err(fail(format!("無効なパーティクルタイプ [ {kind} ] が指定されました")));
+                        return Err(fail(format!(
+                            "無効なパーティクルタイプ [ {kind} ] が指定されました"
+                        )));
                     }
                     if bank as u32 >= 64 {
                         return Err(fail(if single {
@@ -555,12 +560,16 @@ impl RuntimeTraceApi {
                         }));
                     }
                     if frames as u32 > 32 {
-                        return Err(fail(format!("無効なビットマップ数 [ {frames} ] が指定されました")));
+                        return Err(fail(format!(
+                            "無効なビットマップ数 [ {frames} ] が指定されました"
+                        )));
                     }
                     if let Some(&shape) = shapes.first() {
                         if !matches!(shape.2, 1 | 2) || shapes.iter().any(|other| *other != shape) {
                             return Err(fail(if single {
-                                format!("指定されたビットマップ [ {first} ] はパーティクルには使用できません")
+                                format!(
+                                    "指定されたビットマップ [ {first} ] はパーティクルには使用できません"
+                                )
                             } else {
                                 format!(
                                     "指定されたビットマップ [ {} ] の中に適合しないものが含まれています",
@@ -589,10 +598,16 @@ impl RuntimeTraceApi {
                     // sub_4767B0: mixing ratio, then sub_491BC0.
                     target_checks::mixing_ratio(a[2])?;
                     if a[0] != 1 {
-                        return Err(fail(format!("無効なパーティクルタイプ [ {} ] が指定されました", a[0])));
+                        return Err(fail(format!(
+                            "無効なパーティクルタイプ [ {} ] が指定されました",
+                            a[0]
+                        )));
                     }
                     if a[1] as u32 >= 64 {
-                        return Err(fail(format!("無効なオブジェクトパターン [ {} ] が指定されました", a[1])));
+                        return Err(fail(format!(
+                            "無効なオブジェクトパターン [ {} ] が指定されました",
+                            a[1]
+                        )));
                     }
                     if !state
                         .particle_banks
@@ -609,7 +624,10 @@ impl RuntimeTraceApi {
                 }
                 31 => {
                     if a[0] as u32 > 2 {
-                        return Err(fail(format!("無効な制御モード [ {} ] が指定されました", a[0])));
+                        return Err(fail(format!(
+                            "無効な制御モード [ {} ] が指定されました",
+                            a[0]
+                        )));
                     }
                     state.particle_interpolation_mode = a[0];
                 }
@@ -620,7 +638,10 @@ impl RuntimeTraceApi {
                         .ok_or_else(handle_error)?;
                     // sub_424E30 / sub_424E50: pattern (10), then count (6).
                     if a[1] as u32 >= 64 {
-                        return Err(fail(format!("無効なパターン番号 [ {} ] が指定されました", a[1])));
+                        return Err(fail(format!(
+                            "無効なパターン番号 [ {} ] が指定されました",
+                            a[1]
+                        )));
                     }
                     if !s.world.configure_count(
                         usize::from(id == 40),
@@ -628,12 +649,18 @@ impl RuntimeTraceApi {
                         a[2],
                         a[3] as u32,
                     ) {
-                        return Err(fail(format!("無効な最大オブジェクト数 [ {} ] が指定されました", a[2])));
+                        return Err(fail(format!(
+                            "無効な最大オブジェクト数 [ {} ] が指定されました",
+                            a[2]
+                        )));
                     }
                 }
                 37 => {
                     if a[0] as u32 >= 64 {
-                        return Err(fail(format!("無効なパターン番号 [ {} ] が指定されました", a[0])));
+                        return Err(fail(format!(
+                            "無効なパターン番号 [ {} ] が指定されました",
+                            a[0]
+                        )));
                     }
                     let mut style = [0i32; 11];
                     style[0] = 1;
@@ -653,7 +680,10 @@ impl RuntimeTraceApi {
                         .get_mut(&a[0])
                         .ok_or_else(handle_error)?;
                     if a[1] as u32 >= 64 {
-                        return Err(fail(format!("無効なパターン番号 [ {} ] が指定されました", a[1])));
+                        return Err(fail(format!(
+                            "無効なパターン番号 [ {} ] が指定されました",
+                            a[1]
+                        )));
                     }
                     let e = &mut s.world.emitter[a[1] as usize];
                     e.copy_from_slice(&a[2..16]);
@@ -669,7 +699,10 @@ impl RuntimeTraceApi {
                 }
                 45 => {
                     if a[0] as u32 >= 64 {
-                        return Err(fail(format!("無効なパターン番号 [ {} ] が指定されました", a[0])));
+                        return Err(fail(format!(
+                            "無効なパターン番号 [ {} ] が指定されました",
+                            a[0]
+                        )));
                     }
                     let mut s = [0i32; 18];
                     s[0] = 1;
@@ -856,23 +889,38 @@ impl RuntimeTraceApi {
 
     /// sub_477090..sub_4776F0 and their cores, in target order. `popped`
     /// is in pop order (last source argument first).
-    fn check_rain_call(&mut self, id: u16, popped: &[ethornell_vm::Value]) -> ethornell_vm::VmResult<()> {
+    fn check_rain_call(
+        &mut self,
+        id: u16,
+        popped: &[ethornell_vm::Value],
+    ) -> ethornell_vm::VmResult<()> {
         use ethornell_vm::VmError;
         let mut a = popped.iter().map(value_to_i32).collect::<Vec<_>>();
         a.reverse();
         let fail = |text: String| Err(VmError::Runtime(text));
-        let handle_error = || Err(VmError::Runtime("無効なレインスクリーンハンドルが指定されました".into()));
+        let handle_error = || {
+            Err(VmError::Runtime(
+                "無効なレインスクリーンハンドルが指定されました".into(),
+            ))
+        };
         match id {
             // sub_441C70: eight screens, then the size (sub_4253D0).
             0x40 => {
                 if self.effects.rain_count() >= 8 {
-                    return fail("これ以上、レインスクリーンオブジェクトを生成することはできません".into());
+                    return fail(
+                        "これ以上、レインスクリーンオブジェクトを生成することはできません".into(),
+                    );
                 }
                 if a[0] <= 0
                     || a[1] <= 0
-                    || (a[0] as usize).checked_mul(a[1] as usize).is_none_or(|n| n > 16 * 1024 * 1024)
+                    || (a[0] as usize)
+                        .checked_mul(a[1] as usize)
+                        .is_none_or(|n| n > 16 * 1024 * 1024)
                 {
-                    return fail(format!("無効なスクリーンサイズ [ {} , {} ] が指定されました", a[0], a[1]));
+                    return fail(format!(
+                        "無効なスクリーンサイズ [ {} , {} ] が指定されました",
+                        a[0], a[1]
+                    ));
                 }
             }
             // sub_4259A0: -1 clears; else a screen-sized format-3 bitmap.
@@ -922,7 +970,10 @@ impl RuntimeTraceApi {
             // sub_492D80: 1..=1000.
             0x4F => {
                 if (a[1] as u32).wrapping_sub(1) > 999 {
-                    return fail(format!("無効なフレームレート [ {} ] が指定されました", a[1]));
+                    return fail(format!(
+                        "無効なフレームレート [ {} ] が指定されました",
+                        a[1]
+                    ));
                 }
             }
             0x41 | 0x42 | 0x44 | 0x46 | 0x49 | 0x4A | 0x4C | 0x4D => {

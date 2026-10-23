@@ -26,7 +26,9 @@ pub(crate) struct NativeHitMask {
 }
 impl NativeHitMask {
     pub(crate) fn hit(&self, x: i32, y: i32) -> i32 {
-        if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height { return 0; }
+        if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
+            return 0;
+        }
         let stride = (self.width as usize + 7) / 8;
         i32::from(self.bits[y as usize * stride + x as usize / 8] & (1 << (x & 7)))
     }
@@ -144,11 +146,28 @@ impl RuntimeGraphObjectProperties {
         // BackRPL and Sprite mode 4 use SetAlpha to scale their wave
         // samples (409F30), independently of source coverage. Sprite's
         // vector blitter reads only mask alpha and its multiplier.
-        if self.background.is_some_and(|b| matches!(b.class, crate::native_background::NativeBackgroundClass::BackD | crate::native_background::NativeBackgroundClass::BackDst | crate::native_background::NativeBackgroundClass::BackGrd | crate::native_background::NativeBackgroundClass::BackRpl | crate::native_background::NativeBackgroundClass::BackStr | crate::native_background::NativeBackgroundClass::BackRtt | crate::native_background::NativeBackgroundClass::BackMsc)) {
+        if self.background.is_some_and(|b| {
+            matches!(
+                b.class,
+                crate::native_background::NativeBackgroundClass::BackD
+                    | crate::native_background::NativeBackgroundClass::BackDst
+                    | crate::native_background::NativeBackgroundClass::BackGrd
+                    | crate::native_background::NativeBackgroundClass::BackRpl
+                    | crate::native_background::NativeBackgroundClass::BackStr
+                    | crate::native_background::NativeBackgroundClass::BackRtt
+                    | crate::native_background::NativeBackgroundClass::BackMsc
+            )
+        }) {
             return 1.0;
         }
-        if self.background.is_none() && self.named_properties.get("target-object-mode") == Some(&4) {
-            return ((self.alpha_multiplier.wrapping_mul(256i32.wrapping_sub(self.mask_alpha)) >> 8) as f32 / 256.0).clamp(0.0,1.0);
+        if self.background.is_none() && self.named_properties.get("target-object-mode") == Some(&4)
+        {
+            return ((self
+                .alpha_multiplier
+                .wrapping_mul(256i32.wrapping_sub(self.mask_alpha))
+                >> 8) as f32
+                / 256.0)
+                .clamp(0.0, 1.0);
         }
         let transparency = self.transparency_parameter();
         (1.0 - transparency as f32 / 256.0).clamp(0.0, 1.0)

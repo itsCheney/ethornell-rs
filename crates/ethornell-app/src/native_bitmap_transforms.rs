@@ -23,18 +23,29 @@ impl RuntimeTraceApi {
             // destination (0x80000009), then sub_418BE0's format match
             // (0x8000000C).
             let target = |text: String| ethornell_vm::VmError::Runtime(text);
-            let source_error =
-                |bitmap: i32| target(format!("参照元に指定されたビットマップ [ {bitmap} ] は無効です"));
-            let primary = self.graph_bitmap_image(a[3]).ok_or_else(|| source_error(a[3]))?;
+            let source_error = |bitmap: i32| {
+                target(format!(
+                    "参照元に指定されたビットマップ [ {bitmap} ] は無効です"
+                ))
+            };
+            let primary = self
+                .graph_bitmap_image(a[3])
+                .ok_or_else(|| source_error(a[3]))?;
             let pf = format(self, a[3]);
             let other = if a[4] == -1 {
                 None
             } else {
-                Some(self.graph_bitmap_image(a[4]).ok_or_else(|| source_error(a[4]))?)
+                Some(
+                    self.graph_bitmap_image(a[4])
+                        .ok_or_else(|| source_error(a[4]))?,
+                )
             };
             let (width, height) = snapshot::runtime_frame_size(self);
             if a[0] as u32 >= 0x4000 {
-                return Err(target(format!("生成先に指定されたビットマップ [ {} ] は無効です", a[0])));
+                return Err(target(format!(
+                    "生成先に指定されたビットマップ [ {} ] は無効です",
+                    a[0]
+                )));
             }
             if other.is_some() && format(self, a[4]) != pf {
                 return Err(target(format!(
@@ -85,8 +96,16 @@ impl RuntimeTraceApi {
         }
         let destination = a[0];
         let err = |message: String| ethornell_vm::VmError::Runtime(message);
-        let missing_destination = || err(format!("格納先として指定されたビットマップ [ {destination} ] は無効です"));
-        let missing_source = |id: i32| err(format!("参照元として指定されたビットマップ [ {id} ] は無効です"));
+        let missing_destination = || {
+            err(format!(
+                "格納先として指定されたビットマップ [ {destination} ] は無効です"
+            ))
+        };
+        let missing_source = |id: i32| {
+            err(format!(
+                "参照元として指定されたビットマップ [ {id} ] は無効です"
+            ))
+        };
         if id == 0x19 {
             // sub_47A8A0: bitmap checks and the level first; then
             // sub_4027E0's codes 1..6.
@@ -94,10 +113,15 @@ impl RuntimeTraceApi {
             crate::target_checks::bitmap(a[3])?;
             crate::target_checks::effect_level(a[6])?;
             if self.graph_bitmap_image(destination).is_none() {
-                return Err(err(format!("指定された出力先ビットマップ [ {destination} ] は存在しません")));
+                return Err(err(format!(
+                    "指定された出力先ビットマップ [ {destination} ] は存在しません"
+                )));
             }
             if self.graph_bitmap_image(a[3]).is_none() {
-                return Err(err(format!("指定された出力元ビットマップ [ {} ] は存在しません", a[3])));
+                return Err(err(format!(
+                    "指定された出力元ビットマップ [ {} ] は存在しません",
+                    a[3]
+                )));
             }
         } else if self.graph_bitmap_image(destination).is_none() {
             return Err(missing_destination());
@@ -117,10 +141,16 @@ impl RuntimeTraceApi {
                 }
                 if let Some(mask) = &mask {
                     if format(self, a[4]) != 3 {
-                        return Err(err(format!("指定されたビットマップ [ {} ] はグレイスケールではありません", a[4])));
+                        return Err(err(format!(
+                            "指定されたビットマップ [ {} ] はグレイスケールではありません",
+                            a[4]
+                        )));
                     }
                     if (mask.width, mask.height) != (source.width, source.height) {
-                        return Err(err(format!("指定された参照元グレイスケール [ {} ] はサイズが無効です", a[4])));
+                        return Err(err(format!(
+                            "指定された参照元グレイスケール [ {} ] はサイズが無効です",
+                            a[4]
+                        )));
                     }
                 }
                 if !matches!(df, 1 | 2) || mask.is_some() && df != 1 {
@@ -163,19 +193,30 @@ impl RuntimeTraceApi {
                 // sub_402970: destination, source, maps (1, 2, 4, 6), then
                 // sub_412AB0: level (8), first map (5), second map (7),
                 // formats (3).
-                let source = self.graph_bitmap_image(a[1]).ok_or_else(|| missing_source(a[1]))?;
+                let source = self
+                    .graph_bitmap_image(a[1])
+                    .ok_or_else(|| missing_source(a[1]))?;
                 let first = self.query_bitmap_info(a[2]).ok_or_else(|| {
-                    err(format!("第一ベクトルマップとして指定されたビットマップ [ {} ] は無効です", a[2]))
+                    err(format!(
+                        "第一ベクトルマップとして指定されたビットマップ [ {} ] は無効です",
+                        a[2]
+                    ))
                 })?;
                 let second = if a[3] != -1 {
                     Some(self.query_bitmap_info(a[3]).ok_or_else(|| {
-                        err(format!("第二ベクトルマップとして指定されたビットマップ [ {} ] は無効です", a[3]))
+                        err(format!(
+                            "第二ベクトルマップとして指定されたビットマップ [ {} ] は無効です",
+                            a[3]
+                        ))
                     })?)
                 } else {
                     None
                 };
                 if a[4] as u32 > 256 {
-                    return Err(err(format!("無効なエフェクトレベル [ {} ] が指定されました", a[4])));
+                    return Err(err(format!(
+                        "無効なエフェクトレベル [ {} ] が指定されました",
+                        a[4]
+                    )));
                 }
                 if first.format != 4 || first.width < out.width || first.height < out.height {
                     return Err(err(format!(
@@ -184,7 +225,8 @@ impl RuntimeTraceApi {
                     )));
                 }
                 if let Some(second) = second
-                    && (second.format != 4 || (second.width, second.height) != (first.width, first.height))
+                    && (second.format != 4
+                        || (second.width, second.height) != (first.width, first.height))
                 {
                     return Err(err(format!(
                         "第二ベクトルマップとして指定されたビットマップ [ {} ] はベクトルマップではない、\n\n若しくは格納先ビットマップ [ {destination} ] とサイズが一致していません",
@@ -213,7 +255,9 @@ impl RuntimeTraceApi {
                     .ok_or_else(|| fail("displacement map pixels are absent"))?;
             }
             0x1B => {
-                let source = self.graph_bitmap_image(a[1]).ok_or_else(|| missing_source(a[1]))?;
+                let source = self
+                    .graph_bitmap_image(a[1])
+                    .ok_or_else(|| missing_source(a[1]))?;
                 if df != format(self, a[1])
                     || (source.width, source.height) != (out.width, out.height)
                 {
@@ -223,10 +267,16 @@ impl RuntimeTraceApi {
                     )));
                 }
                 if a[2] as u32 > 1 {
-                    return Err(err(format!("無効なグラデーションタイプ [ {} ] が指定されました", a[2])));
+                    return Err(err(format!(
+                        "無効なグラデーションタイプ [ {} ] が指定されました",
+                        a[2]
+                    )));
                 }
                 if a[3] as u32 > 256 {
-                    return Err(err(format!("無効なエフェクトレベル [ {} ] が指定されました", a[3])));
+                    return Err(err(format!(
+                        "無効なエフェクトレベル [ {} ] が指定されました",
+                        a[3]
+                    )));
                 }
                 if !matches!(df, 1 | 2) {
                     return Ok(());
@@ -240,12 +290,20 @@ impl RuntimeTraceApi {
             0x1C => {
                 // sub_402C90: 1, 2, output range (5), reference range (6),
                 // then the formats (8) in sub_414DF0.
-                let source = self.graph_bitmap_image(a[5]).ok_or_else(|| missing_source(a[5]))?;
+                let source = self
+                    .graph_bitmap_image(a[5])
+                    .ok_or_else(|| missing_source(a[5]))?;
                 if (a[3] as u32) < 2 || (a[4] as u32) < 2 {
-                    return Err(err(format!("無効な出力範囲 [ {}, {} ] が指定されました", a[3], a[4])));
+                    return Err(err(format!(
+                        "無効な出力範囲 [ {}, {} ] が指定されました",
+                        a[3], a[4]
+                    )));
                 }
                 if (a[8] as u32) < 2 || (a[9] as u32) < 2 {
-                    return Err(err(format!("無効な参照範囲 [ {}, {} ] が指定されました", a[8], a[9])));
+                    return Err(err(format!(
+                        "無効な参照範囲 [ {}, {} ] が指定されました",
+                        a[8], a[9]
+                    )));
                 }
                 if df != format(self, a[5]) {
                     return Err(err(format!(
@@ -305,7 +363,9 @@ impl RuntimeTraceApi {
                 }
             }
             0x1D => {
-                let source = self.graph_bitmap_image(a[1]).ok_or_else(|| missing_source(a[1]))?;
+                let source = self
+                    .graph_bitmap_image(a[1])
+                    .ok_or_else(|| missing_source(a[1]))?;
                 if df != format(self, a[1]) {
                     return Err(err(format!(
                         "ビットマップ [ {destination} ] とビットマップ [ {} ] には互換性がありません",

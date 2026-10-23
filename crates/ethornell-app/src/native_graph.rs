@@ -149,9 +149,14 @@ impl RuntimeTraceApi {
         self.native_sprite_masks.remove(&object);
         self.native_mode6_rasters.remove(&object);
         self.native_projection_mips.remove(&object);
-        if matches!(mode,5|6) {
-            let p=self.graph_object_properties.entry(object).or_default();
-            p.properties.retain(|key,_|!matches!(*key,0x40|0x41|0x42|0x43|0x80|0x81|0x82|0x83|0x8f));
+        if matches!(mode, 5 | 6) {
+            let p = self.graph_object_properties.entry(object).or_default();
+            p.properties.retain(|key, _| {
+                !matches!(
+                    *key,
+                    0x40 | 0x41 | 0x42 | 0x43 | 0x80 | 0x81 | 0x82 | 0x83 | 0x8f
+                )
+            });
             p.named_properties.remove("mode6-transition-current");
         }
         self.graph90_set_mode(object, mode);
@@ -284,12 +289,13 @@ impl RuntimeTraceApi {
             let _ = self.graph90_refresh_backf_primary(object);
             self.refresh_sprite_mask(object);
             self.sync_native_effector_parameters(object);
-            if self.graph90_background_class(object)==Some(NativeBackgroundClass::BackMl){self.refresh_native_backml();}
+            if self.graph90_background_class(object) == Some(NativeBackgroundClass::BackMl) {
+                self.refresh_native_backml();
+            }
         }
         for object in geometry_refresh {
             let _ = self.graph90_resync_fixed_sprite_geometry(object);
         }
-
     }
 
     fn graph90_set_alpha_multiplier_recursive(&mut self, object: i32, multiplier: i32) {
@@ -390,10 +396,14 @@ impl RuntimeTraceApi {
         // sub_41B1D0 with its update flag set: sub_41C130 rewrites the
         // parent's member record for this object (CDspObj+0x11C parent,
         // record list at +0x12C) to the new offset from the parent.
-        let relink = self.graph_native_owners.get(&object).copied().and_then(|parent| {
-            let (parent_x, parent_y) = self.graph_native_base_position(parent)?;
-            Some((parent, (x.wrapping_sub(parent_x), y.wrapping_sub(parent_y))))
-        });
+        let relink = self
+            .graph_native_owners
+            .get(&object)
+            .copied()
+            .and_then(|parent| {
+                let (parent_x, parent_y) = self.graph_native_base_position(parent)?;
+                Some((parent, (x.wrapping_sub(parent_x), y.wrapping_sub(parent_y))))
+            });
         let mut pending = vec![(object, x, y, relink.map(|(_, offset)| offset))];
         if let Some((parent, offset)) = relink {
             self.graph90_set_child_link_offset(parent, object, offset);
@@ -465,9 +475,9 @@ impl RuntimeTraceApi {
                         properties.native.fixed_position_y_16_16 = y;
                         self.graph91_multilayer_background.object_x_16_16 = x;
                         self.graph91_multilayer_background.object_y_16_16 = y;
-                        let index=self.graph91_multilayer_background.selected_layer;
-                        self.graph91_multilayer_background.layers[index].x_16_16=x;
-                        self.graph91_multilayer_background.layers[index].y_16_16=y;
+                        let index = self.graph91_multilayer_background.selected_layer;
+                        self.graph91_multilayer_background.layers[index].x_16_16 = x;
+                        self.graph91_multilayer_background.layers[index].y_16_16 = y;
                         self.graph91_sync_all_multilayer_render_layers();
                     }
                     _ => {}
@@ -1491,7 +1501,9 @@ impl RuntimeTraceApi {
         // the same primary and cleared secondary as the native sprite.
         self.graph90_record_call(object, selector, &args);
         self.native_projection_mips.remove(&object);
-        if mode==6 {self.native_mode6_rasters.remove(&object);}
+        if mode == 6 {
+            self.native_mode6_rasters.remove(&object);
+        }
         let rebuilt = match mode {
             2 => self.graph90_sync_mode2_primary_layer(&args),
             5 => self.graph90_sync_mode5_primary_layer(&args),
@@ -1684,63 +1696,162 @@ impl RuntimeTraceApi {
         )
     }
 
-    fn graph90_bind_vm_effect(&mut self,object:i32,primary:i32,vector:i32) {
-        let bindings=[primary,vector].map(|bitmap|(bitmap,self.graph_resources.get(&bitmap).map_or(0,|r|r.generation)));
-        self.native_vm_effect_bindings.insert(object,bindings);
+    fn graph90_bind_vm_effect(&mut self, object: i32, primary: i32, vector: i32) {
+        let bindings = [primary, vector].map(|bitmap| {
+            (
+                bitmap,
+                self.graph_resources
+                    .get(&bitmap)
+                    .map_or(0, |r| r.generation),
+            )
+        });
+        self.native_vm_effect_bindings.insert(object, bindings);
     }
 
-    pub(super) fn graph90_set_vm_wave_window(&mut self, object: i32, alpha: i32, offset: i32) -> std::result::Result<(), i32> {
+    pub(super) fn graph90_set_vm_wave_window(
+        &mut self,
+        object: i32,
+        alpha: i32,
+        offset: i32,
+    ) -> std::result::Result<(), i32> {
         let properties = self.graph_object_properties.get(&object).ok_or(254)?;
         let back = self.graph90_background_class(object) == Some(NativeBackgroundClass::BackRpl);
-        if !back && properties.named_properties.get("target-object-mode") != Some(&4) { return Ok(()); }
+        if !back && properties.named_properties.get("target-object-mode") != Some(&4) {
+            return Ok(());
+        }
         let get = |name: &str| properties.named_properties.get(name).copied().unwrap_or(0);
-        let slot = get(if back { "target-record-pointer" } else { "mode4-record-pointer" });
-        let count = get(if back { "target-record-count" } else { "mode4-record-count" });
-        let alpha = if alpha as u32 <= 256 { alpha } else { properties.alpha_parameter() };
-        if self.effects.vm_wave_samples(slot,count,offset,alpha).is_none() { return Err(254); }
+        let slot = get(if back {
+            "target-record-pointer"
+        } else {
+            "mode4-record-pointer"
+        });
+        let count = get(if back {
+            "target-record-count"
+        } else {
+            "mode4-record-count"
+        });
+        let alpha = if alpha as u32 <= 256 {
+            alpha
+        } else {
+            properties.alpha_parameter()
+        };
+        if self
+            .effects
+            .vm_wave_samples(slot, count, offset, alpha)
+            .is_none()
+        {
+            return Err(254);
+        }
         let properties = self.graph_object_properties.get_mut(&object).unwrap();
-        properties.properties.insert(0x100,(alpha,offset));
+        properties.properties.insert(0x100, (alpha, offset));
         properties.set_alpha_parameter(alpha);
         self.graph90_refresh_vm_effect(object).map_err(|_| 254)?;
         Ok(())
     }
 
-    pub(super) fn graph90_refresh_vm_effect(&mut self, object: i32) -> std::result::Result<bool, String> {
-        let Some(properties) = self.graph_object_properties.get(&object) else { return Ok(false); };
-        let background = self.graph90_background_class(object) == Some(NativeBackgroundClass::BackRpl);
-        let sprite = !background && properties.named_properties.get("target-object-mode") == Some(&4);
-        if !background && !sprite { return Ok(false); }
+    pub(super) fn graph90_refresh_vm_effect(
+        &mut self,
+        object: i32,
+    ) -> std::result::Result<bool, String> {
+        let Some(properties) = self.graph_object_properties.get(&object) else {
+            return Ok(false);
+        };
+        let background =
+            self.graph90_background_class(object) == Some(NativeBackgroundClass::BackRpl);
+        let sprite =
+            !background && properties.named_properties.get("target-object-mode") == Some(&4);
+        if !background && !sprite {
+            return Ok(false);
+        }
         let get = |name: &str| properties.named_properties.get(name).copied().unwrap_or(0);
-        let primary = properties.format_resource.ok_or("missing VM primary bitmap")?;
-        let vector = get(if background { "target-auxiliary-resource" } else { "mode4-effect-resource" });
-        let count = get(if background { "target-record-count" } else { "mode4-record-count" });
-        let slot = get(if background { "target-record-pointer" } else { "mode4-record-pointer" });
+        let primary = properties
+            .format_resource
+            .ok_or("missing VM primary bitmap")?;
+        let vector = get(if background {
+            "target-auxiliary-resource"
+        } else {
+            "mode4-effect-resource"
+        });
+        let count = get(if background {
+            "target-record-count"
+        } else {
+            "mode4-record-count"
+        });
+        let slot = get(if background {
+            "target-record-pointer"
+        } else {
+            "mode4-record-pointer"
+        });
         let alpha = properties.alpha_parameter();
         let offset = properties.properties.get(&0x100).map_or(0, |v| v.1);
         let filter = background && properties.properties.get(&255).is_some_and(|v| v.0 != 0);
-        let origin = if background { properties.background.and_then(|b| b.integer_position()).map(|(x,y)| [x,y]).unwrap_or([0,0]) } else { [0,0] };
-        let source_info = self.query_bitmap_info(primary).ok_or("missing VM primary bitmap")?;
-        let vector_info = self.query_bitmap_info(vector).ok_or("missing VM vector bitmap")?;
-        if vector_info.format != 6 { return Err("VM auxiliary bitmap must have format 6".into()); }
-        let size = if background { [self.screen_width.max(1) as u32, self.screen_height.max(1) as u32] } else { [source_info.width,source_info.height] };
-        if (background && (vector_info.width < size[0] || vector_info.height < size[1])) || (!background && (vector_info.width != size[0] || vector_info.height != size[1])) { return Err("VM vector bitmap dimensions do not match the drawable".into()); }
-        let waves = self.effects.vm_wave_samples(slot,count,offset,alpha).ok_or("VM wave slot is absent or too short")?;
-        let source = self.graph_bitmap_image(primary).ok_or("missing VM primary pixels")?;
-        let image = self.effects.warp_vector_map(vector,&source,&waves,origin,size,!background,filter).ok_or("missing VM vector pixels")?;
+        let origin = if background {
+            properties
+                .background
+                .and_then(|b| b.integer_position())
+                .map(|(x, y)| [x, y])
+                .unwrap_or([0, 0])
+        } else {
+            [0, 0]
+        };
+        let source_info = self
+            .query_bitmap_info(primary)
+            .ok_or("missing VM primary bitmap")?;
+        let vector_info = self
+            .query_bitmap_info(vector)
+            .ok_or("missing VM vector bitmap")?;
+        if vector_info.format != 6 {
+            return Err("VM auxiliary bitmap must have format 6".into());
+        }
+        let size = if background {
+            [
+                self.screen_width.max(1) as u32,
+                self.screen_height.max(1) as u32,
+            ]
+        } else {
+            [source_info.width, source_info.height]
+        };
+        if (background && (vector_info.width < size[0] || vector_info.height < size[1]))
+            || (!background && (vector_info.width != size[0] || vector_info.height != size[1]))
+        {
+            return Err("VM vector bitmap dimensions do not match the drawable".into());
+        }
+        let waves = self
+            .effects
+            .vm_wave_samples(slot, count, offset, alpha)
+            .ok_or("VM wave slot is absent or too short")?;
+        let source = self
+            .graph_bitmap_image(primary)
+            .ok_or("missing VM primary pixels")?;
+        let image = self
+            .effects
+            .warp_vector_map(vector, &source, &waves, origin, size, !background, filter)
+            .ok_or("missing VM vector pixels")?;
         let key = format!("runtime:vm-effect:{object}");
-        if self.graph_images.get(&key) == Some(&image) && self.graph_layers.get(&object).is_some_and(|l| l.key == key) { return Ok(true); }
+        if self.graph_images.get(&key) == Some(&image)
+            && self.graph_layers.get(&object).is_some_and(|l| l.key == key)
+        {
+            return Ok(true);
+        }
         let width = image.width as f32;
         let height = image.height as f32;
-        self.store_graph_image(key.clone(),image);
+        self.store_graph_image(key.clone(), image);
         if background {
             let saved = self.graph_object_properties[&object].background;
-            self.graph90_sync_primary_layer(object,primary,0,0);
-            self.graph_object_properties.get_mut(&object).unwrap().background = saved;
+            self.graph90_sync_primary_layer(object, primary, 0, 0);
+            self.graph_object_properties
+                .get_mut(&object)
+                .unwrap()
+                .background = saved;
         }
         if let Some(layer) = self.graph_layers.get_mut(&object) {
-            layer.key=key; layer.src_x=0.0; layer.src_y=0.0; layer.width=width; layer.height=height;
+            layer.key = key;
+            layer.src_x = 0.0;
+            layer.src_y = 0.0;
+            layer.width = width;
+            layer.height = height;
         }
-        self.graph_redraw_requested=Some(false);
+        self.graph_redraw_requested = Some(false);
         Ok(true)
     }
 
@@ -1781,7 +1892,9 @@ impl RuntimeTraceApi {
         args
     }
 
-    fn graph90_sync_mode6_primary_layer(&mut self,args:&[i32])->bool {self.sync_mode6_raster(args)}
+    fn graph90_sync_mode6_primary_layer(&mut self, args: &[i32]) -> bool {
+        self.sync_mode6_raster(args)
+    }
 
     pub(super) fn graph90_mode5_dynamic_state(&self, object: i32) -> NativeMode5DynamicState {
         let Some(properties) = self.graph_object_properties.get(&object) else {
@@ -1969,36 +2082,70 @@ impl RuntimeTraceApi {
             None
         };
 
-        let [anchor_x,anchor_y,angle,scale_x,scale_y]=mode5.mode5_transform_parameters(dynamic);
-        let Some(prepared)=self.prepare_projected_source(mode5.node_id,mode5.resource_id,secondary,transition_value,scale_x as u32) else {
+        let [anchor_x, anchor_y, angle, scale_x, scale_y] =
+            mode5.mode5_transform_parameters(dynamic);
+        let Some(prepared) = self.prepare_projected_source(
+            mode5.node_id,
+            mode5.resource_id,
+            secondary,
+            transition_value,
+            scale_x as u32,
+        ) else {
             self.graph_layers.remove(&mode5.node_id);
             return false;
         };
-        let rasterized=if prepared.level>0 || prepared.deformed {
-            let width=geometry.width as u32;
-            let height=geometry.height as u32;
-            if width==0 || height==0 || u64::from(width)*u64::from(height)>16*1024*1024 {return false;}
-            let mut ax=(anchor_x >> prepared.level).wrapping_add(prepared.anchor_shift);
-            let mut ay=anchor_y >> prepared.level;
-            let sx=scale_x.wrapping_shl(prepared.level);
-            let sy=scale_y.wrapping_shl(prepared.level);
-            let mut temp=sx as u32;
-            let mut n=1;
-            while temp<65536 && temp!=0 && n<32 {
-                let delta=if temp>=32768 {(65536-temp)>>n} else {32768>>n};
-                ax=ax.wrapping_add(delta as i32);ay=ay.wrapping_add(delta as i32);
-                temp=temp.wrapping_mul(2);n+=1;
+        let rasterized = if prepared.level > 0 || prepared.deformed {
+            let width = geometry.width as u32;
+            let height = geometry.height as u32;
+            if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16 * 1024 * 1024
+            {
+                return false;
             }
-            let project=|p:i32| if mode5.project_position {((i64::from(p)*i64::from(mode5.perspective_scale_fixed()))>>16) as i32} else {p};
-            let destination=[
-                (geometry.origin_offset_x as i32).wrapping_shl(16).wrapping_add(project(mode5.position_x)&65535),
-                (geometry.origin_offset_y as i32).wrapping_shl(16).wrapping_add(project(mode5.position_y)&65535),
+            let mut ax = (anchor_x >> prepared.level).wrapping_add(prepared.anchor_shift);
+            let mut ay = anchor_y >> prepared.level;
+            let sx = scale_x.wrapping_shl(prepared.level);
+            let sy = scale_y.wrapping_shl(prepared.level);
+            let mut temp = sx as u32;
+            let mut n = 1;
+            while temp < 65536 && temp != 0 && n < 32 {
+                let delta = if temp >= 32768 {
+                    (65536 - temp) >> n
+                } else {
+                    32768 >> n
+                };
+                ax = ax.wrapping_add(delta as i32);
+                ay = ay.wrapping_add(delta as i32);
+                temp = temp.wrapping_mul(2);
+                n += 1;
+            }
+            let project = |p: i32| {
+                if mode5.project_position {
+                    ((i64::from(p) * i64::from(mode5.perspective_scale_fixed())) >> 16) as i32
+                } else {
+                    p
+                }
+            };
+            let destination = [
+                (geometry.origin_offset_x as i32)
+                    .wrapping_shl(16)
+                    .wrapping_add(project(mode5.position_x) & 65535),
+                (geometry.origin_offset_y as i32)
+                    .wrapping_shl(16)
+                    .wrapping_add(project(mode5.position_y) & 65535),
             ];
-            let raster=crate::native_effector::native_inverse_affine(&prepared.image,[width,height],destination,[ax,ay,angle,sx,sy],mode5.interpolation);
-            let key=format!("runtime:sprite-mode5-raster:{}",mode5.node_id);
-            self.store_graph_image(key.clone(),raster);
+            let raster = crate::native_effector::native_inverse_affine(
+                &prepared.image,
+                [width, height],
+                destination,
+                [ax, ay, angle, sx, sy],
+                mode5.interpolation,
+            );
+            let key = format!("runtime:sprite-mode5-raster:{}", mode5.node_id);
+            self.store_graph_image(key.clone(), raster);
             Some(key)
-        }else{None};
+        } else {
+            None
+        };
 
         let synced = self.graph90_sync_sprite_primary_layer(
             mode5.node_id,
@@ -2022,13 +2169,15 @@ impl RuntimeTraceApi {
                 layer.scale_x = geometry.width / source.width.max(1.0);
                 layer.scale_y = geometry.height / source.height.max(1.0);
                 layer.rotation_degrees = geometry.rotation_degrees;
-                if let Some(key)=rasterized {
-                    layer.key=key;
-                    layer.width=geometry.width;
-                    layer.height=geometry.height;
-                    layer.src_x=0.;layer.src_y=0.;
-                    layer.scale_x=1.;layer.scale_y=1.;
-                    layer.rotation_degrees=0.;
+                if let Some(key) = rasterized {
+                    layer.key = key;
+                    layer.width = geometry.width;
+                    layer.height = geometry.height;
+                    layer.src_x = 0.;
+                    layer.src_y = 0.;
+                    layer.scale_x = 1.;
+                    layer.scale_y = 1.;
+                    layer.rotation_degrees = 0.;
                 }
                 // Graph91:37/36 (+0x5C..+0x64 / +0x6C..+0x74) were
                 // consumed by sub_41B4C0 before projection. Graph90:37/36 are
@@ -2162,16 +2311,23 @@ impl RuntimeTraceApi {
     /// Sprite [148] / [151]: the base rotation that Graph91:38 parameter
     /// 0x41 reports when property 0x41 never replaced it.
     pub(crate) fn graph90_sprite_base_rotation(&self, object: i32) -> Option<i32> {
-        let (selector,count,index)=match self.graph90_sprite_mode(object)? {2=>(0x59,13,6),5=>(0x5C,17,10),6=>(0x5D,20,12),_=>return None};
-        self.graph90_recorded_source_args(object,selector,count)?.get(index).copied()
+        let (selector, count, index) = match self.graph90_sprite_mode(object)? {
+            2 => (0x59, 13, 6),
+            5 => (0x5C, 17, 10),
+            6 => (0x5D, 20, 12),
+            _ => return None,
+        };
+        self.graph90_recorded_source_args(object, selector, count)?
+            .get(index)
+            .copied()
     }
 
     /// Graph91:38 parameter 0x10000000 for a mode-5 sprite (sub_4296C0).
     pub(crate) fn graph90_sprite_transform_parameters(&self, object: i32) -> Option<Vec<i32>> {
-        if self.graph90_sprite_mode(object)==Some(6) {
-            let args=self.graph90_recorded_source_args(object,0x5D,20)?;
-            let p=self.mode6_transform_parameters(&args)?;
-            return Some(vec![p[0],p[1],p[4],p[5],p[6]]);
+        if self.graph90_sprite_mode(object) == Some(6) {
+            let args = self.graph90_recorded_source_args(object, 0x5D, 20)?;
+            let p = self.mode6_transform_parameters(&args)?;
+            return Some(vec![p[0], p[1], p[4], p[5], p[6]]);
         }
         let (mode5, dynamic, _) = self.graph90_mode5_projection(object)?;
         Some(mode5.mode5_transform_parameters(dynamic).to_vec())
@@ -2179,9 +2335,12 @@ impl RuntimeTraceApi {
 
     /// Sprite [181]/[182]: the projected raster size from sub_4291E0.
     pub(crate) fn graph90_sprite_projected_extent(&self, object: i32) -> Option<(i32, i32)> {
-        if self.graph90_sprite_mode(object)==Some(6) {
-            let p=&self.graph_object_properties.get(&object)?.named_properties;
-            return Some((*p.get("mode6-projected-width")?,*p.get("mode6-projected-height")?));
+        if self.graph90_sprite_mode(object) == Some(6) {
+            let p = &self.graph_object_properties.get(&object)?.named_properties;
+            return Some((
+                *p.get("mode6-projected-width")?,
+                *p.get("mode6-projected-height")?,
+            ));
         }
         let (_, _, geometry) = self.graph90_mode5_projection(object)?;
         Some((geometry.width as i32, geometry.height as i32))
@@ -2328,9 +2487,17 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             (0x90, 0x19..=0x1D) => {
-                let count=match id {0x19=>7,0x1A=>6,0x1B|0x1D=>4,0x1C=>10,_=>unreachable!()};
-                let args=Self::graph90_source_args(stack,count);
-                if let Err(error)=self.execute_bitmap_transform(0x90,id,&args) {return Some(Err(error));}
+                let count = match id {
+                    0x19 => 7,
+                    0x1A => 6,
+                    0x1B | 0x1D => 4,
+                    0x1C => 10,
+                    _ => unreachable!(),
+                };
+                let args = Self::graph90_source_args(stack, count);
+                if let Err(error) = self.execute_bitmap_transform(0x90, id, &args) {
+                    return Some(Err(error));
+                }
                 ethornell_vm::Value::None
             }
             (0x90, 0x21) => {
@@ -2697,7 +2864,9 @@ impl RuntimeTraceApi {
                         } else if reason.starts_with("secondary") {
                             format!("指定されたビットマップ [ {secondary} ] は存在しません")
                         } else if reason.contains("expected format 3") {
-                            format!("指定されたビットマップ [ {mask} ] はグレイスケールではありません")
+                            format!(
+                                "指定されたビットマップ [ {mask} ] はグレイスケールではありません"
+                            )
                         } else {
                             format!("指定されたビットマップ [ {mask} ] は存在しません")
                         };
@@ -2751,7 +2920,9 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("target-extension-0x154".to_string(), args[4]);
                 }
-                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
+                if let Err(error) = self.configure_background_effect(id, &args, &[]) {
+                    return Some(Err(error));
+                }
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2767,7 +2938,9 @@ impl RuntimeTraceApi {
                         .or_default()
                         .format_resource = Some(args[0]);
                 }
-                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
+                if let Err(error) = self.configure_background_effect(id, &args, &[]) {
+                    return Some(Err(error));
+                }
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2795,13 +2968,16 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("target-record-pointer".to_string(), args[3]);
                 }
-                self.graph90_bind_vm_effect(object,args[0],args[1]);
+                self.graph90_bind_vm_effect(object, args[0], args[1]);
                 if let Err(reason) = self.graph90_refresh_vm_effect(object) {
                     // sub_462740's codes in the target's texts.
                     let message = if reason.contains("primary") {
                         format!("指定されたビットマップ [ {} ] は存在しません", args[0])
                     } else if reason == "missing VM vector bitmap" {
-                        format!("指定されたベクトル＆ディスタンスマップ [ {} ] は存在しません", args[1])
+                        format!(
+                            "指定されたベクトル＆ディスタンスマップ [ {} ] は存在しません",
+                            args[1]
+                        )
                     } else if reason.contains("vector") || reason.contains("auxiliary") {
                         format!(
                             "指定されたビットマップ [ {} ] はベクトル＆ディスタンスマップではない、或いはスクリーンサイズとピクセル数が一致していません",
@@ -2836,7 +3012,9 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("target-height".to_string(), args[4]);
                 }
-                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
+                if let Err(error) = self.configure_background_effect(id, &args, &[]) {
+                    return Some(Err(error));
+                }
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2854,7 +3032,9 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("target-height".to_string(), args[2]);
                 }
-                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
+                if let Err(error) = self.configure_background_effect(id, &args, &[]) {
+                    return Some(Err(error));
+                }
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2876,7 +3056,9 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("target-source-flag".to_string(), args[4]);
                 }
-                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
+                if let Err(error) = self.configure_background_effect(id, &args, &[]) {
+                    return Some(Err(error));
+                }
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2965,7 +3147,9 @@ impl RuntimeTraceApi {
                     GRAPH90_CLASS_SPRITE,
                 );
                 if !released {
-                    return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なスプライトハンドルが指定されました".to_string(),
+                    )));
                 }
                 tracing::debug!(handle, "GraphReleaseSpriteObject");
                 ethornell_vm::Value::None
@@ -2983,9 +3167,15 @@ impl RuntimeTraceApi {
                         "Graph90:53 expected five arguments".into(),
                     )));
                 };
-                if !self.graph90_object_matches(handle, GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE)
-                {
-                    return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
+                if !self.graph90_object_matches(
+                    handle,
+                    GRAPH90_SPRITE_TAG,
+                    512,
+                    GRAPH90_CLASS_SPRITE,
+                ) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なスプライトハンドルが指定されました".to_string(),
+                    )));
                 }
                 let mode = self
                     .graph_object_properties
@@ -2999,7 +3189,7 @@ impl RuntimeTraceApi {
                     ))));
                 }
                 if matches!(mode, 5 | 6) {
-                    self.invalidate_projected_mips(handle, [_x,_y,width,height]);
+                    self.invalidate_projected_mips(handle, [_x, _y, width, height]);
                     let _ = self.graph90_resync_fixed_sprite_geometry(handle);
                 }
                 self.graph_redraw_requested = Some(false);
@@ -3010,7 +3200,12 @@ impl RuntimeTraceApi {
                 let args = Self::graph90_source_args(stack, 2);
                 // sub_47CCF0 -> sub_462AA0: an unknown sprite is fatal.
                 if let [handle, _] = args.as_slice()
-                    && !self.graph90_object_matches(*handle, GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE)
+                    && !self.graph90_object_matches(
+                        *handle,
+                        GRAPH90_SPRITE_TAG,
+                        512,
+                        GRAPH90_CLASS_SPRITE,
+                    )
                 {
                     return Some(Err(ethornell_vm::VmError::Runtime(
                         "無効なスプライトハンドルが指定されました".into(),
@@ -3043,9 +3238,15 @@ impl RuntimeTraceApi {
                 // 8-bit nor ARGB (2) are script errors; -1 clears the aux
                 // bitmap. Setting one drops an aux-object relation.
                 if let [handle, bitmap] = args.as_slice() {
-                    if !self.graph90_object_matches(*handle, GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE)
-                    {
-                        return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
+                    if !self.graph90_object_matches(
+                        *handle,
+                        GRAPH90_SPRITE_TAG,
+                        512,
+                        GRAPH90_CLASS_SPRITE,
+                    ) {
+                        return Some(Err(ethornell_vm::VmError::Runtime(
+                            "無効なスプライトハンドルが指定されました".to_string(),
+                        )));
                     }
                     if *bitmap != -1 {
                         match self.query_bitmap_info(*bitmap) {
@@ -3119,7 +3320,9 @@ impl RuntimeTraceApi {
                     512,
                     GRAPH90_CLASS_SPRITE,
                 ) {
-                    return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なスプライトハンドルが指定されました".to_string(),
+                    )));
                 }
                 if self.resource_image_region(args[3]).is_none() {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
@@ -3217,17 +3420,22 @@ impl RuntimeTraceApi {
                         ))));
                     }
                     if !sprite_valid {
-                        return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
+                        return Some(Err(ethornell_vm::VmError::Runtime(
+                            "無効なスプライトハンドルが指定されました".to_string(),
+                        )));
                     }
                     if matches!(mode, 0 | 2 | 5 | 6) && !bitmap_valid {
                         return Some(Err(ethornell_vm::VmError::Runtime(format!(
                             "指定されたビットマップ [ {primary_bitmap} ] は無効です"
                         ))));
                     }
-                    let replaced = self.graph90_replace_sprite_primary(*object, *primary_bitmap)
-                        .map_err(|_| ethornell_vm::VmError::Runtime(format!(
-                            "指定されたビットマップ [ {primary_bitmap} ] は無効です"
-                        )));
+                    let replaced = self
+                        .graph90_replace_sprite_primary(*object, *primary_bitmap)
+                        .map_err(|_| {
+                            ethornell_vm::VmError::Runtime(format!(
+                                "指定されたビットマップ [ {primary_bitmap} ] は無効です"
+                            ))
+                        });
                     let replaced = match replaced {
                         Ok(replaced) => replaced,
                         Err(error) => return Some(Err(error)),
@@ -3324,12 +3532,17 @@ impl RuntimeTraceApi {
                 {
                     return Some(Err(error));
                 }
-                if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE)
-                {
+                if !self.graph90_object_matches(
+                    args[0],
+                    GRAPH90_SPRITE_TAG,
+                    512,
+                    GRAPH90_CLASS_SPRITE,
+                ) {
                     return fail("無効なスプライトハンドルが指定されました".into());
                 }
                 let sizes = [args[3], args[4]].map(|bitmap| {
-                    self.query_bitmap_info(bitmap).map(|info| (info.width, info.height))
+                    self.query_bitmap_info(bitmap)
+                        .map(|info| (info.width, info.height))
                 });
                 if sizes.iter().any(Option::is_none) {
                     return fail(format!(
@@ -3406,12 +3619,21 @@ impl RuntimeTraceApi {
                 // sub_43EBB0: unknown sprite (255), bitmap (1), a scaled
                 // extent below two pixels (8).
                 if args.len() == 13 {
-                    if let Err(error) =
-                        Self::graph90_validate_sprite_arguments(id, args[12], args[11], args[10], &[])
-                    {
+                    if let Err(error) = Self::graph90_validate_sprite_arguments(
+                        id,
+                        args[12],
+                        args[11],
+                        args[10],
+                        &[],
+                    ) {
                         return Some(Err(error));
                     }
-                    if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE) {
+                    if !self.graph90_object_matches(
+                        args[0],
+                        GRAPH90_SPRITE_TAG,
+                        512,
+                        GRAPH90_CLASS_SPRITE,
+                    ) {
                         return Some(Err(ethornell_vm::VmError::Runtime(
                             "無効なスプライトハンドルが指定されました".into(),
                         )));
@@ -3510,7 +3732,12 @@ impl RuntimeTraceApi {
                     {
                         return Some(Err(error));
                     }
-                    if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE) {
+                    if !self.graph90_object_matches(
+                        args[0],
+                        GRAPH90_SPRITE_TAG,
+                        512,
+                        GRAPH90_CLASS_SPRITE,
+                    ) {
                         return Some(Err(ethornell_vm::VmError::Runtime(
                             "無効なスプライトハンドルが指定されました".into(),
                         )));
@@ -3545,7 +3772,9 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("mode3-fixed-parameter".to_string(), args[6]);
                     self.graph90_sync_mode3_primary_layer(&args);
-                    if let Err(error)=self.configure_sprite_mask(&args) {return Some(Err(error));}
+                    if let Err(error) = self.configure_sprite_mask(&args) {
+                        return Some(Err(error));
+                    }
                     self.graph90_record_call(args[0], id, &args);
                 }
                 ethornell_vm::Value::None
@@ -3562,7 +3791,12 @@ impl RuntimeTraceApi {
                     {
                         return Some(Err(error));
                     }
-                    if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE) {
+                    if !self.graph90_object_matches(
+                        args[0],
+                        GRAPH90_SPRITE_TAG,
+                        512,
+                        GRAPH90_CLASS_SPRITE,
+                    ) {
                         return Some(Err(ethornell_vm::VmError::Runtime(
                             "無効なスプライトハンドルが指定されました".into(),
                         )));
@@ -3603,7 +3837,7 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("mode4-record-pointer".to_string(), args[6]);
                     self.graph90_sync_mode4_primary_layer(&args);
-                    self.graph90_bind_vm_effect(args[0],args[3],args[4]);
+                    self.graph90_bind_vm_effect(args[0], args[3], args[4]);
                     if let Err(reason) = self.graph90_refresh_vm_effect(args[0]) {
                         let message = if reason.contains("primary") {
                             format!("無効なビットマップ [ {} ] が指定されました", args[3])
@@ -3654,7 +3888,9 @@ impl RuntimeTraceApi {
                     512,
                     GRAPH90_CLASS_SPRITE,
                 ) {
-                    return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なスプライトハンドルが指定されました".to_string(),
+                    )));
                 }
                 let primary = self.query_bitmap_info(args[4]);
                 let secondary = (args[5] != -1).then(|| self.query_bitmap_info(args[5]));
@@ -3846,7 +4082,11 @@ impl RuntimeTraceApi {
             }
             (0x90, 0x5D) => {
                 let args = Self::graph90_source_args(stack, 20);
-                if args.len()!=20 {return Some(Err(ethornell_vm::VmError::Runtime("90:5D expected twenty arguments".into())));}
+                if args.len() != 20 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "90:5D expected twenty arguments".into(),
+                    )));
+                }
                 // sub_47DA60: bitmap, mixing ratio, blend mode, transparency,
                 // priority; sub_462A10: unknown sprite (255), bitmaps (1),
                 // projection scale (8).
@@ -3858,7 +4098,12 @@ impl RuntimeTraceApi {
                 {
                     return Some(Err(error));
                 }
-                if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE) {
+                if !self.graph90_object_matches(
+                    args[0],
+                    GRAPH90_SPRITE_TAG,
+                    512,
+                    GRAPH90_CLASS_SPRITE,
+                ) {
                     return Some(Err(ethornell_vm::VmError::Runtime(
                         "無効なスプライトハンドルが指定されました".into(),
                     )));
@@ -3880,11 +4125,25 @@ impl RuntimeTraceApi {
                         Some(args[18]),
                         Some(args[19]),
                     );
-                    let primary_info=self.query_bitmap_info(args[4]);
-                    let secondary_info=if args[5]==-1 {None}else{self.query_bitmap_info(args[5])};
-                    if primary_info.is_none() || args[5]!=-1 && secondary_info.is_none() {return Some(Err(ethornell_vm::VmError::Runtime(format!("指定されたビットマップ [ {} , {} ] のいずれかが無効です", args[4], args[5]))));}
-                    if let (Some(primary),Some(secondary))=(primary_info,secondary_info) {
-                        if primary.width!=secondary.width || primary.height!=secondary.height || primary.format!=secondary.format {return Some(Ok(ethornell_vm::Value::None));}
+                    let primary_info = self.query_bitmap_info(args[4]);
+                    let secondary_info = if args[5] == -1 {
+                        None
+                    } else {
+                        self.query_bitmap_info(args[5])
+                    };
+                    if primary_info.is_none() || args[5] != -1 && secondary_info.is_none() {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "指定されたビットマップ [ {} , {} ] のいずれかが無効です",
+                            args[4], args[5]
+                        ))));
+                    }
+                    if let (Some(primary), Some(secondary)) = (primary_info, secondary_info) {
+                        if primary.width != secondary.width
+                            || primary.height != secondary.height
+                            || primary.format != secondary.format
+                        {
+                            return Some(Ok(ethornell_vm::Value::None));
+                        }
                     }
                     self.graph90_begin_sprite_configuration(args[0], 6);
                     let properties = self.graph_object_properties.entry(args[0]).or_default();
@@ -3972,7 +4231,11 @@ impl RuntimeTraceApi {
                         ))));
                     }
                     self.graph90_record_call(args[0], id, &args);
-                } else {return Some(Err(ethornell_vm::VmError::Runtime("90:5D invalid sprite object".into())));}
+                } else {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "90:5D invalid sprite object".into(),
+                    )));
+                }
                 ethornell_vm::Value::None
             }
             (0x90, 0x60) => {
@@ -4012,7 +4275,12 @@ impl RuntimeTraceApi {
             (0x90, 0x64) => {
                 let args = Self::graph90_source_args(stack, 2);
                 if let [handle, _] = args.as_slice()
-                    && !self.graph90_object_matches(*handle, GRAPH90_FILTER_TAG, 8, GRAPH90_CLASS_FILTER)
+                    && !self.graph90_object_matches(
+                        *handle,
+                        GRAPH90_FILTER_TAG,
+                        8,
+                        GRAPH90_CLASS_FILTER,
+                    )
                 {
                     return Some(Err(ethornell_vm::VmError::Runtime(
                         "無効なフィルターハンドルが指定されました".into(),
@@ -4032,9 +4300,11 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             (0x90, 0x65 | 0x66) => {
-                let args=Self::graph90_source_args(stack,if id==0x65{4}else{7});
-                if let Err(error)=self.configure_native_filter(id,&args){return Some(Err(error));}
-                self.graph90_record_call(args[0],id,&args);
+                let args = Self::graph90_source_args(stack, if id == 0x65 { 4 } else { 7 });
+                if let Err(error) = self.configure_native_filter(id, &args) {
+                    return Some(Err(error));
+                }
+                self.graph90_record_call(args[0], id, &args);
                 ethornell_vm::Value::None
             }
             (0x90, 0x70) => {
@@ -4081,10 +4351,17 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             (0x90, 0x75 | 0x76 | 0x79 | 0x7A) => {
-                let count=match id{0x75=>7,0x76=>5,0x79=>6,_=>2};
-                let args=Self::graph90_source_args(stack,count);
-                if let Err(error)=self.configure_native_map(id,&args){return Some(Err(error));}
-                self.graph90_record_call(args[0],id,&args);
+                let count = match id {
+                    0x75 => 7,
+                    0x76 => 5,
+                    0x79 => 6,
+                    _ => 2,
+                };
+                let args = Self::graph90_source_args(stack, count);
+                if let Err(error) = self.configure_native_map(id, &args) {
+                    return Some(Err(error));
+                }
+                self.graph90_record_call(args[0], id, &args);
                 ethornell_vm::Value::None
             }
             (0x90, 0x78) => unreachable!("90:78 uses the VM u16 tile-table bridge"),
@@ -4113,19 +4390,24 @@ impl RuntimeTraceApi {
                 // (2), width not divisible (3) are fatal; 0 clears.
                 let fail = |message: String| Some(Err(ethornell_vm::VmError::Runtime(message)));
                 if character_count as u32 > 0xFF {
-                    return fail(format!("無効な文字数 [ {character_count} ] が指定されました"));
+                    return fail(format!(
+                        "無効な文字数 [ {character_count} ] が指定されました"
+                    ));
                 }
                 if character_count == 0 {
                     self.fullwidth_glyph_bitmap = None;
                     self.fullwidth_glyph_count = 0;
                     self.fullwidth_glyph_cell_width = 0;
                 } else {
-                    let Some((width, _height)) = self.bitmap_dimensions.get(&bitmap).copied() else {
+                    let Some((width, _height)) = self.bitmap_dimensions.get(&bitmap).copied()
+                    else {
                         return fail(format!("無効なビットマップ [ {bitmap} ] が指定されました"));
                     };
                     let count = character_count as u32;
                     if width % count != 0 {
-                        return fail(format!("指定されたビットマップ [ {bitmap} ] は適合しません"));
+                        return fail(format!(
+                            "指定されたビットマップ [ {bitmap} ] は適合しません"
+                        ));
                     }
                     self.fullwidth_glyph_bitmap = Some(bitmap);
                     self.fullwidth_glyph_count = character_count;
@@ -4220,11 +4502,19 @@ impl RuntimeTraceApi {
                 }
                 if let Some(&(width, height)) = self.bitmap_dimensions.get(&target) {
                     let format = self.bitmap_formats.get(&target).copied().unwrap_or(2);
-                    let pixel = if format == 2 { [0, 0, 0, 0] } else { [0, 0, 0, 255] };
+                    let pixel = if format == 2 {
+                        [0, 0, 0, 0]
+                    } else {
+                        [0, 0, 0, 255]
+                    };
                     let key = format!("runtime:bitmap:{target}");
                     self.store_graph_image(
                         key.clone(),
-                        DecodedImage { width, height, rgba: pixel.repeat(width as usize * height as usize) },
+                        DecodedImage {
+                            width,
+                            height,
+                            rgba: pixel.repeat(width as usize * height as usize),
+                        },
                     );
                     if let Some(resource) = self.graph_resources.get_mut(&target) {
                         resource.key = key;
@@ -4244,8 +4534,12 @@ impl RuntimeTraceApi {
                 }
                 if let Err(code) = self.flip_graph_bitmap(destination, source, direction) {
                     return Some(Err(ethornell_vm::VmError::Runtime(match code {
-                        0x8000_0009 => format!("出力先に指定されたビットマップ [ {destination} ] は無効です"),
-                        0x8000_000A => format!("参照元に指定されたビットマップ [ {source} ] は無効です"),
+                        0x8000_0009 => {
+                            format!("出力先に指定されたビットマップ [ {destination} ] は無効です")
+                        }
+                        0x8000_000A => {
+                            format!("参照元に指定されたビットマップ [ {source} ] は無効です")
+                        }
                         _ => format!("無効な方向 [ {direction} ] が指定されました"),
                     })));
                 }
@@ -4262,23 +4556,27 @@ impl RuntimeTraceApi {
                 }
                 if let Err(code) = self.downsample_graph_bitmap_half(destination, source) {
                     return Some(Err(ethornell_vm::VmError::Runtime(match code {
-                        0x8000_0006 => format!("参照元に指定されたビットマップ [ {source} ] は小さすぎます"),
+                        0x8000_0006 => {
+                            format!("参照元に指定されたビットマップ [ {source} ] は小さすぎます")
+                        }
                         _ => format!("参照元に指定されたビットマップ [ {source} ] は無効です"),
                     })));
                 }
                 ethornell_vm::Value::None
             }
             (0x90, 0xC4) => {
-                if file_policy::restricted() {return Some(Err(ethornell_vm::VmError::Runtime("unsupported external bitmap descriptor import".into())));}
+                if file_policy::restricted() {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "unsupported external bitmap descriptor import".into(),
+                    )));
+                }
                 let pixel_mode = pop_int_value(stack).unwrap_or_default();
                 let file = pop_string_value(stack).unwrap_or_default();
                 let destination = pop_int_value(stack).unwrap_or_default();
                 let status = if !matches!(pixel_mode, -1 | 1 | 2 | 3) {
                     -1
                 } else if let Some(bytes) = read_runtime_bytes(&self.manager, "", &file) {
-                    match Some(bytes)
-                        .and_then(|bytes| decode_image(&bytes).ok())
-                    {
+                    match Some(bytes).and_then(|bytes| decode_image(&bytes).ok()) {
                         Some(image) => {
                             // The target writes a GDI+ bitmap descriptor through
                             // the BP destination. VM-owned pointer emission is
@@ -4306,7 +4604,11 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::Int(status)
             }
             (0x90, 0xC5) => {
-                if file_policy::restricted() {return Some(Err(ethornell_vm::VmError::Runtime("unsupported external bitmap export; atomic user-save API required".into())));}
+                if file_policy::restricted() {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "unsupported external bitmap export; atomic user-save API required".into(),
+                    )));
+                }
                 let bitmap = pop_int_value(stack).unwrap_or_default();
                 let quality = pop_int_value(stack).unwrap_or_default();
                 let format = pop_int_value(stack).unwrap_or_default();
@@ -4367,7 +4669,10 @@ impl RuntimeTraceApi {
                 if let Err(error) = target_checks::bitmap(bitmap) {
                     return Some(Err(error));
                 }
-                let key = (Some(namespace.to_ascii_lowercase()), name.to_ascii_lowercase());
+                let key = (
+                    Some(namespace.to_ascii_lowercase()),
+                    name.to_ascii_lowercase(),
+                );
                 // sub_401CE0: the BG registry first, then the DCCache.
                 let bytes = if consume {
                     self.graph_blob_cache.remove(&key)
@@ -4406,7 +4711,10 @@ impl RuntimeTraceApi {
                 // pushed operand: destination, x, y, source, anchor x/y,
                 // scale x/y, translation x/y/z, pitch, heading, bank, axis
                 // order, perspective distance, blend mode, blend parameter.
-                let args = pop_args(stack, 18).iter().map(value_to_i32).collect::<Vec<_>>();
+                let args = pop_args(stack, 18)
+                    .iter()
+                    .map(value_to_i32)
+                    .collect::<Vec<_>>();
                 let arg = |pushed: usize| args.get(17 - pushed).copied().unwrap_or_default();
                 let (destination, source) = (arg(0), arg(3));
                 let blit = crate::perspective_blit::PerspectiveBlit {
@@ -4458,7 +4766,13 @@ impl RuntimeTraceApi {
                     spans.as_ref(),
                     &blit,
                 );
-                tracing::debug!(destination, source, ?blit, changed, "GraphTransformBitmapGeneral");
+                tracing::debug!(
+                    destination,
+                    source,
+                    ?blit,
+                    changed,
+                    "GraphTransformBitmapGeneral"
+                );
                 if changed {
                     self.store_runtime_bitmap(destination, target, target_format);
                 }
@@ -4610,5 +4924,4 @@ impl RuntimeTraceApi {
             }
         }
     }
-
 }

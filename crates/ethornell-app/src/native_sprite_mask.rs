@@ -140,21 +140,59 @@ mod tests {
     use super::*;
     #[test]
     fn mode3_copies_mask_and_rebuilds_from_fixed_parameter() {
-        let manager=ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let mut api=RuntimeTraceApi::new(manager);
-        for (bitmap,key,format,rgba) in [(1,"test:mask-primary",1,vec![100,20,30,255,80,60,40,255]),(2,"test:mask-source",3,vec![0,0,0,255,255,255,255,255])] {
-            api.store_graph_image(key.into(),DecodedImage{width:2,height:1,rgba});
-            api.graph_resources.insert(bitmap,RuntimeGraphResource::whole(key.into()));api.bitmap_formats.insert(bitmap,format);
+        let manager = ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = RuntimeTraceApi::new(manager);
+        for (bitmap, key, format, rgba) in [
+            (
+                1,
+                "test:mask-primary",
+                1,
+                vec![100, 20, 30, 255, 80, 60, 40, 255],
+            ),
+            (
+                2,
+                "test:mask-source",
+                3,
+                vec![0, 0, 0, 255, 255, 255, 255, 255],
+            ),
+        ] {
+            api.store_graph_image(
+                key.into(),
+                DecodedImage {
+                    width: 2,
+                    height: 1,
+                    rgba,
+                },
+            );
+            api.graph_resources
+                .insert(bitmap, RuntimeGraphResource::whole(key.into()));
+            api.bitmap_formats.insert(bitmap, format);
         }
-        let mut call=ethornell_vm::NativeCallFrame::new(ethornell_vm::NativeOpcode{group:0x90,id:0x50},vec![]);
-        let object=GraphApi::call_graph(&mut api,&mut call).unwrap().as_i32();
-        let mut call=ethornell_vm::NativeCallFrame::new(ethornell_vm::NativeOpcode{group:0x90,id:0x5A},[object,0,0,1,2,0,128,1,0,0].into_iter().map(ethornell_vm::Value::Int).collect());
-        GraphApi::call_graph(&mut api,&mut call).unwrap();
-        let key=api.graph_layers[&object].key.clone();
-        assert_eq!(api.graph_images[&key].rgba[3],255);assert_eq!(api.graph_images[&key].rgba[7],1);
+        let mut call = ethornell_vm::NativeCallFrame::new(
+            ethornell_vm::NativeOpcode {
+                group: 0x90,
+                id: 0x50,
+            },
+            vec![],
+        );
+        let object = GraphApi::call_graph(&mut api, &mut call).unwrap().as_i32();
+        let mut call = ethornell_vm::NativeCallFrame::new(
+            ethornell_vm::NativeOpcode {
+                group: 0x90,
+                id: 0x5A,
+            },
+            [object, 0, 0, 1, 2, 0, 128, 1, 0, 0]
+                .into_iter()
+                .map(ethornell_vm::Value::Int)
+                .collect(),
+        );
+        GraphApi::call_graph(&mut api, &mut call).unwrap();
+        let key = api.graph_layers[&object].key.clone();
+        assert_eq!(api.graph_images[&key].rgba[3], 255);
+        assert_eq!(api.graph_images[&key].rgba[7], 1);
         api.graph_resources.remove(&2);
-        api.graph90_set_fixed_parameter_raw_recursive(object,256<<16);
-        assert_eq!(api.graph_images[&key].rgba[7],255);
+        api.graph90_set_fixed_parameter_raw_recursive(object, 256 << 16);
+        assert_eq!(api.graph_images[&key].rgba[7], 255);
         assert!(api.sprite_mask_binding_current(object));
     }
 }

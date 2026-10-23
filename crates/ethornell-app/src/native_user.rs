@@ -1005,7 +1005,9 @@ impl RuntimeTraceApi {
                         "無効なウィンドウサイズ [ {width} , {height} ] が指定されました"
                     ))));
                 }
-                let Some(handle) = self.native_user.allocate_debug_window(title, x, y, width, height)
+                let Some(handle) = self
+                    .native_user
+                    .allocate_debug_window(title, x, y, width, height)
                 else {
                     return Some(Err(ethornell_vm::VmError::Runtime(
                         "これ以上、チャイルドウィンドウを生成することはできません".into(),
@@ -1028,7 +1030,9 @@ impl RuntimeTraceApi {
                 let visible = pop_int_value(stack).unwrap_or_default() != 0;
                 let handle = pop_int_value(stack).unwrap_or_default();
                 let Some(window) = self.native_user.debug_window_mut(handle) else {
-                    return Some(Err(ethornell_vm::VmError::Runtime(CHILD_WINDOW_HANDLE.into())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        CHILD_WINDOW_HANDLE.into(),
+                    )));
                 };
                 window.visible = visible;
                 ethornell_vm::Value::None
@@ -1037,7 +1041,9 @@ impl RuntimeTraceApi {
                 let title = pop_string_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
                 let Some(window) = self.native_user.debug_window_mut(handle) else {
-                    return Some(Err(ethornell_vm::VmError::Runtime(CHILD_WINDOW_HANDLE.into())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        CHILD_WINDOW_HANDLE.into(),
+                    )));
                 };
                 window.title = title;
                 ethornell_vm::Value::None
@@ -1047,7 +1053,9 @@ impl RuntimeTraceApi {
                 let x = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
                 let Some(window) = self.native_user.debug_window_mut(handle) else {
-                    return Some(Err(ethornell_vm::VmError::Runtime(CHILD_WINDOW_HANDLE.into())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        CHILD_WINDOW_HANDLE.into(),
+                    )));
                 };
                 window.x = x;
                 window.y = y;
@@ -1056,7 +1064,9 @@ impl RuntimeTraceApi {
             0x17 => {
                 let handle = pop_int_value(stack).unwrap_or_default();
                 let Some(window) = self.native_user.debug_window(handle) else {
-                    return Some(Err(ethornell_vm::VmError::Runtime(CHILD_WINDOW_HANDLE.into())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        CHILD_WINDOW_HANDLE.into(),
+                    )));
                 };
                 stack.push(ethornell_vm::Value::Int(window.x));
                 ethornell_vm::Value::Int(window.y)
@@ -1065,7 +1075,9 @@ impl RuntimeTraceApi {
                 let color = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
                 let Some(window) = self.native_user.debug_window_mut(handle) else {
-                    return Some(Err(ethornell_vm::VmError::Runtime(CHILD_WINDOW_HANDLE.into())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        CHILD_WINDOW_HANDLE.into(),
+                    )));
                 };
                 window.clear_color = color;
                 window.bitmap_draws.clear();
@@ -1092,7 +1104,9 @@ impl RuntimeTraceApi {
                     .debug_window(handle)
                     .map(|window| (window.width, window.height))
                 else {
-                    return Some(Err(ethornell_vm::VmError::Runtime(CHILD_WINDOW_HANDLE.into())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        CHILD_WINDOW_HANDLE.into(),
+                    )));
                 };
                 let Some(info) = ethornell_vm::GraphApi::query_bitmap_info(self, bitmap) else {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
@@ -1143,7 +1157,9 @@ impl RuntimeTraceApi {
                     ))));
                 }
                 if self.native_user.debug_window(handle).is_none() {
-                    return Some(Err(ethornell_vm::VmError::Runtime(CHILD_WINDOW_HANDLE.into())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        CHILD_WINDOW_HANDLE.into(),
+                    )));
                 }
                 if !(4..=200).contains(&font_size) {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
@@ -1161,7 +1177,9 @@ impl RuntimeTraceApi {
                     .saturating_add(1)
                     / 2;
                 let Some(window) = self.native_user.debug_window_mut(handle) else {
-                    return Some(Err(ethornell_vm::VmError::Runtime(CHILD_WINDOW_HANDLE.into())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        CHILD_WINDOW_HANDLE.into(),
+                    )));
                 };
                 window.text_draws.push(NativeDebugTextDraw {
                     x,
@@ -1181,7 +1199,9 @@ impl RuntimeTraceApi {
                 let close_message = pop_string_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
                 let Some(window) = self.native_user.debug_window_mut(handle) else {
-                    return Some(Err(ethornell_vm::VmError::Runtime(CHILD_WINDOW_HANDLE.into())));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        CHILD_WINDOW_HANDLE.into(),
+                    )));
                 };
                 window.close_message = close_message;
                 ethornell_vm::Value::None
@@ -1205,13 +1225,17 @@ impl RuntimeTraceApi {
                     || (height as u32) < 8
                     || height > self.screen_height
                 {
-                    return fail(format!("無効なウィンドウサイズ [ {width}, {height} ] が指定されました"));
+                    return fail(format!(
+                        "無効なウィンドウサイズ [ {width}, {height} ] が指定されました"
+                    ));
                 }
                 if self.native_user.font_face(font_id).is_none() {
                     return fail(format!("無効なフォント番号 [ {font_id} ] が指定されました"));
                 }
                 if (font_size as u32).wrapping_sub(8) > 0x38 {
-                    return fail(format!("無効なフォントサイズ [ {font_size} ] が指定されました"));
+                    return fail(format!(
+                        "無効なフォントサイズ [ {font_size} ] が指定されました"
+                    ));
                 }
                 if (max_chars as u32).wrapping_sub(1) > 0xFF {
                     return fail(format!("無効な有効文字数 [ {max_chars} ] が指定されました"));
@@ -1421,7 +1445,11 @@ impl RuntimeTraceApi {
                 let name = pop_string_value(stack).unwrap_or_default();
                 let available = !name.is_empty()
                     && (self.manager.find(&name).is_some()
-                        || if let Some(policy) = file_policy::active() { policy.metadata(&name).is_some_and(|m| m.is_file()) } else { std::path::Path::new(&name).is_file() });
+                        || if let Some(policy) = file_policy::active() {
+                            policy.metadata(&name).is_some_and(|m| m.is_file())
+                        } else {
+                            std::path::Path::new(&name).is_file()
+                        });
                 if available {
                     self.native_user.font_resources.insert(name);
                 }
@@ -1435,7 +1463,11 @@ impl RuntimeTraceApi {
                 // (AddFontResourceA).
                 let name = pop_string_value(stack).unwrap_or_default();
                 let archive = pop_string_value(stack).unwrap_or_default();
-                let key = if archive.is_empty() { name.clone() } else { format!("{archive}:{name}") };
+                let key = if archive.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{archive}:{name}")
+                };
                 let registered = self
                     .native_user
                     .font_resources
@@ -1489,7 +1521,11 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             0xF0 => {
-                if file_policy::restricted() { return Some(Err(ethornell_vm::VmError::Runtime("unsupported desktop wallpaper capability".into()))); }
+                if file_policy::restricted() {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "unsupported desktop wallpaper capability".into(),
+                    )));
+                }
                 let tile = pop_int_value(stack).unwrap_or_default();
                 let style = pop_int_value(stack).unwrap_or_default();
                 let path = pop_string_value(stack).unwrap_or_default();

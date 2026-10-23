@@ -36,10 +36,16 @@ impl RuntimeTraceApi {
             _ => [-1, -1],
         };
         if id == 0x66 && a[1] as u32 > 1 {
-            return Err(err(format!("指定されたグラデーションタイプ [ {} ] は無効です", a[1])));
+            return Err(err(format!(
+                "指定されたグラデーションタイプ [ {} ] は無効です",
+                a[1]
+            )));
         }
         if id == 0x68 && (a[4] == 0 || a[5] == 0) {
-            return Err(err(format!("無効な伸縮倍率 [ {} , {} ] が指定されました", a[4], a[5])));
+            return Err(err(format!(
+                "無効な伸縮倍率 [ {} , {} ] が指定されました",
+                a[4], a[5]
+            )));
         }
         let mut bindings = Vec::new();
         for (index, bitmap) in maps.into_iter().enumerate() {
@@ -54,8 +60,12 @@ impl RuntimeTraceApi {
                     (0x67, _) => format!(
                         "ベクトル＆ディスタンスマップとして指定されたビットマップ [ {bitmap} ] は無効です"
                     ),
-                    (_, 0) => format!("第一ベクトルマップとして指定されたビットマップ [ {bitmap} ] は無効です"),
-                    _ => format!("第二ベクトルマップとして指定されたビットマップ [ {bitmap} ] は無効です"),
+                    (_, 0) => format!(
+                        "第一ベクトルマップとして指定されたビットマップ [ {bitmap} ] は無効です"
+                    ),
+                    _ => format!(
+                        "第二ベクトルマップとして指定されたビットマップ [ {bitmap} ] は無効です"
+                    ),
                 })
             };
             let info = self.query_bitmap_info(bitmap).ok_or_else(missing)?;
@@ -77,11 +87,20 @@ impl RuntimeTraceApi {
                     ),
                 }));
             }
-            bindings.push((bitmap, self.graph_resources.get(&bitmap).ok_or_else(missing)?.generation));
+            bindings.push((
+                bitmap,
+                self.graph_resources
+                    .get(&bitmap)
+                    .ok_or_else(missing)?
+                    .generation,
+            ));
         }
         let waves = if id == 0x67 {
             if a[2] == 0 {
-                return Err(err(format!("無効なディスタンスの最大値 [ {} ] が指定されました", a[2])));
+                return Err(err(format!(
+                    "無効なディスタンスの最大値 [ {} ] が指定されました",
+                    a[2]
+                )));
             }
             self.effects
                 .vm_wave_samples(a[3], a[2], 0, alpha)
@@ -123,7 +142,11 @@ impl RuntimeTraceApi {
         self.store_graph_image(key.clone(), crate::native_map_filter::blank(w, h));
         self.install_native_map_filter_layer(object, key, w, h);
         // Configuring never touches vtable+4; keep a 91:64 hide in place.
-        let shown = self.graph_object_draw_enabled.get(&object).copied().unwrap_or(true);
+        let shown = self
+            .graph_object_draw_enabled
+            .get(&object)
+            .copied()
+            .unwrap_or(true);
         self.set_graph_object_draw_enabled_raw(object, shown);
         self.refresh_native_filters();
         Ok(())

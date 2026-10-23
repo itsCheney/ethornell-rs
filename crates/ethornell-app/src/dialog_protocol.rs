@@ -28,11 +28,14 @@ pub(crate) fn dialog_kind(request: &UserDialogRequest) -> &'static str {
 }
 
 pub(crate) fn request_json(request: &UserDialogRequest) -> String {
-    let field = |label: &str, initial: &str, max_bytes: usize, numeric: bool| {
-        json!({"label": label, "initial": initial, "max_bytes": max_bytes, "numeric": numeric})
-    };
+    let field = |label: &str, initial: &str, max_bytes: usize, numeric: bool| json!({"label": label, "initial": initial, "max_bytes": max_bytes, "numeric": numeric});
     let value = match request {
-        UserDialogRequest::Input { title, initial, max_bytes, numeric } => json!({
+        UserDialogRequest::Input {
+            title,
+            initial,
+            max_bytes,
+            numeric,
+        } => json!({
             "type": "input",
             "title": title,
             "fields": [field(title, initial, *max_bytes, *numeric)],
@@ -69,13 +72,21 @@ pub(crate) fn request_json(request: &UserDialogRequest) -> String {
             "max_bytes": max_bytes_per_segment,
             "numeric": numeric,
         }),
-        UserDialogRequest::Selection { title, prompt, options } => json!({
+        UserDialogRequest::Selection {
+            title,
+            prompt,
+            options,
+        } => json!({
             "type": "select",
             "title": title,
             "prompt": prompt,
             "options": options,
         }),
-        UserDialogRequest::DateFields { fields, month_index, day_index } => json!({
+        UserDialogRequest::DateFields {
+            fields,
+            month_index,
+            day_index,
+        } => json!({
             "type": "date",
             "fields": fields,
             "month": month_index,
@@ -86,7 +97,11 @@ pub(crate) fn request_json(request: &UserDialogRequest) -> String {
 }
 
 fn constraint(numeric: bool) -> TextInputConstraint {
-    if numeric { TextInputConstraint::SignedDecimal } else { TextInputConstraint::Any }
+    if numeric {
+        TextInputConstraint::SignedDecimal
+    } else {
+        TextInputConstraint::Any
+    }
 }
 
 /// Decode a host answer for `request`. Ok(None) is a cancel; Err is a
@@ -95,15 +110,24 @@ pub(crate) fn response_from_json(
     request: &UserDialogRequest,
     text: &str,
 ) -> Result<Option<UserDialogResponse>, String> {
-    let value: Value =
-        serde_json::from_str(text).map_err(|error| format!("dialog response is not JSON: {error}"))?;
-    if !value.get("accepted").and_then(Value::as_bool).unwrap_or(false) {
+    let value: Value = serde_json::from_str(text)
+        .map_err(|error| format!("dialog response is not JSON: {error}"))?;
+    if !value
+        .get("accepted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return Ok(None);
     }
     let texts = value
         .get("texts")
         .and_then(Value::as_array)
-        .map(|texts| texts.iter().map(|text| text.as_str().unwrap_or_default().to_string()).collect())
+        .map(|texts| {
+            texts
+                .iter()
+                .map(|text| text.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
         .unwrap_or_else(Vec::<String>::new);
     let text_at = |index: usize| texts.get(index).cloned().unwrap_or_default();
     let integer = |name: &str| {
@@ -114,9 +138,13 @@ pub(crate) fn response_from_json(
             .ok_or_else(|| format!("dialog response lacks integer `{name}`"))
     };
     Ok(Some(match request {
-        UserDialogRequest::Input { max_bytes, numeric, .. } => {
-            UserDialogResponse::Input(constrain_text(&text_at(0), *max_bytes, constraint(*numeric)))
-        }
+        UserDialogRequest::Input {
+            max_bytes, numeric, ..
+        } => UserDialogResponse::Input(constrain_text(
+            &text_at(0),
+            *max_bytes,
+            constraint(*numeric),
+        )),
         UserDialogRequest::TwoField {
             first_max_bytes,
             first_numeric,
@@ -127,7 +155,12 @@ pub(crate) fn response_from_json(
             constrain_text(&text_at(0), *first_max_bytes, constraint(*first_numeric)),
             constrain_text(&text_at(1), *second_max_bytes, constraint(*second_numeric)),
         ]),
-        UserDialogRequest::Segmented { segment_count, max_bytes_per_segment, numeric, .. } => {
+        UserDialogRequest::Segmented {
+            segment_count,
+            max_bytes_per_segment,
+            numeric,
+            ..
+        } => {
             // The desktop dialog filters each segment (decimal or ASCII
             // alphanumeric) and joins them with '-'.
             let filter = if *numeric {
@@ -188,10 +221,19 @@ mod tests {
         assert_eq!(json["fields"][1]["numeric"], true);
         assert_eq!(dialog_kind(&request), "input");
         assert_eq!(
-            response_from_json(&request, r#"{"accepted":true,"texts":["山田太郎","-1a2b3"]}"#),
-            Ok(Some(UserDialogResponse::TwoField(["山田".into(), "-12".into()])))
+            response_from_json(
+                &request,
+                r#"{"accepted":true,"texts":["山田太郎","-1a2b3"]}"#
+            ),
+            Ok(Some(UserDialogResponse::TwoField([
+                "山田".into(),
+                "-12".into()
+            ])))
         );
-        assert_eq!(response_from_json(&request, r#"{"accepted":false}"#), Ok(None));
+        assert_eq!(
+            response_from_json(&request, r#"{"accepted":false}"#),
+            Ok(None)
+        );
         assert!(response_from_json(&request, "nope").is_err());
     }
 
@@ -215,7 +257,10 @@ mod tests {
             numeric: false,
         };
         assert_eq!(
-            response_from_json(&segments, r#"{"accepted":true,"texts":["ab-c","de","f","ghi"]}"#),
+            response_from_json(
+                &segments,
+                r#"{"accepted":true,"texts":["ab-c","de","f","ghi"]}"#
+            ),
             Ok(Some(UserDialogResponse::Segmented("ab-de-f-gh".into())))
         );
         let date = UserDialogRequest::DateFields {

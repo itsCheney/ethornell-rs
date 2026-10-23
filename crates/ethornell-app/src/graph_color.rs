@@ -71,7 +71,12 @@ mod tests {
     fn native_identity_control_points_are_identity_tables() {
         let lut = RuntimeColorLut::from_control_points([[128, 128]; 3]).unwrap();
         for table in lut.lane_tables() {
-            assert!(table.iter().enumerate().all(|(index, &value)| usize::from(value) == index));
+            assert!(
+                table
+                    .iter()
+                    .enumerate()
+                    .all(|(index, &value)| usize::from(value) == index)
+            );
         }
     }
 

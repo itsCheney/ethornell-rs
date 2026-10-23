@@ -49,11 +49,20 @@ impl RuntimeTraceApi {
         if self.display_tree.kind(object) != Some(NativeDisplayKind::Map) {
             return Err(err("無効なマップハンドルが指定されました".into()));
         }
-        let unfit = || err(format!("ビットマップ [ {} ] は指定されたマップオブジェクトに適合しません", a[3]));
+        let unfit = || {
+            err(format!(
+                "ビットマップ [ {} ] は指定されたマップオブジェクトに適合しません",
+                a[3]
+            ))
+        };
         match id {
             0x75 => {
                 let info = self.query_bitmap_info(a[3]).ok_or_else(unfit)?;
-                let generation = self.graph_resources.get(&a[3]).ok_or_else(unfit)?.generation;
+                let generation = self
+                    .graph_resources
+                    .get(&a[3])
+                    .ok_or_else(unfit)?
+                    .generation;
                 let map = self.native_maps.entry(object).or_default();
                 let Some([_, _, cw, ch]) = map.grid else {
                     return Err(unfit());
@@ -82,10 +91,16 @@ impl RuntimeTraceApi {
             0x76 => {
                 let (cols, rows, cw, ch) = (a[1] as u32, a[2] as u32, a[3] as u32, a[4] as u32);
                 if cw.wrapping_sub(1) > 255 || ch.wrapping_sub(1) > 255 {
-                    return Err(err(format!("無効なチップサイズ [ {} , {} ] が指定されました", a[3], a[4])));
+                    return Err(err(format!(
+                        "無効なチップサイズ [ {} , {} ] が指定されました",
+                        a[3], a[4]
+                    )));
                 }
                 if cols == 0 || rows == 0 || cols > 1024 / cw || rows > 768 / ch {
-                    return Err(err(format!("無効なビューサイズ [ {} , {} ] が指定されました", a[1], a[2])));
+                    return Err(err(format!(
+                        "無効なビューサイズ [ {} , {} ] が指定されました",
+                        a[1], a[2]
+                    )));
                 }
                 let map = self.native_maps.entry(object).or_default();
                 map.grid = Some([cols, rows, cw, ch]);
@@ -148,7 +163,9 @@ impl RuntimeTraceApi {
             0x7a => {
                 let map = self.native_maps.entry(object).or_default();
                 if map.grid.is_none() {
-                    return Err(err("指定されたオブジェクトは初期化が完了していません".into()));
+                    return Err(err(
+                        "指定されたオブジェクトは初期化が完了していません".into()
+                    ));
                 }
                 // 424278..424288 advances ESI twice on a match. The
                 // native overread past the allocation is defined as zero here.
@@ -329,18 +346,32 @@ impl RuntimeTraceApi {
             return Err(err("無効なフィルターハンドルが指定されました".into()));
         }
         let (w, h) = snapshot::runtime_frame_size(self);
-        let missing = || err(format!("無効なビットマップ番号 [ {mask} ] が指定されました"));
+        let missing = || {
+            err(format!(
+                "無効なビットマップ番号 [ {mask} ] が指定されました"
+            ))
+        };
         let mask = if mask == -1 {
             None
         } else {
             let info = self.query_bitmap_info(mask).ok_or_else(missing)?;
             if info.format != 3 {
-                return Err(err(format!("指定されたビットマップ [ {mask} ] はグレイスケールではありません")));
+                return Err(err(format!(
+                    "指定されたビットマップ [ {mask} ] はグレイスケールではありません"
+                )));
             }
             if info.width != w || info.height != h {
-                return Err(err(format!("指定されたビットマップ [ {mask} ] はスクリーンサイズではありません")));
+                return Err(err(format!(
+                    "指定されたビットマップ [ {mask} ] はスクリーンサイズではありません"
+                )));
             }
-            Some((mask, self.graph_resources.get(&mask).ok_or_else(missing)?.generation))
+            Some((
+                mask,
+                self.graph_resources
+                    .get(&mask)
+                    .ok_or_else(missing)?
+                    .generation,
+            ))
         };
         self.graph90_set_common_state(object, None, None, Some(alpha), Some(priority));
         self.native_filters.insert(
@@ -599,9 +630,17 @@ mod tests {
         let filter = call(&mut api, 0x60, &[]).as_i32();
         call(&mut api, 0x66, &[filter, 0, 0, -1, 0, 0, 1216]);
         call(&mut api, 0x64, &[filter, 1]);
-        assert!(api.graph_output_draw_items().iter().any(|item| item.owner_object == Some(filter)));
+        assert!(
+            api.graph_output_draw_items()
+                .iter()
+                .any(|item| item.owner_object == Some(filter))
+        );
         call(&mut api, 0x61, &[filter]);
         assert!(!api.graph_layers.contains_key(&filter));
-        assert!(api.graph_output_draw_items().iter().all(|item| item.owner_object != Some(filter)));
+        assert!(
+            api.graph_output_draw_items()
+                .iter()
+                .all(|item| item.owner_object != Some(filter))
+        );
     }
 }

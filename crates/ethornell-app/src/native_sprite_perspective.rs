@@ -137,15 +137,21 @@ impl RuntimeTraceApi {
             .get("mode6-transition-current")
             .copied()
             .unwrap_or(a[6]);
-        let Some(prepared) = self.prepare_projected_source(object,a[4],a[5],transition,crate::native_projected_source::perspective_ratio(vector.position_z,a[14] as u32)) else {
+        let Some(prepared) = self.prepare_projected_source(
+            object,
+            a[4],
+            a[5],
+            transition,
+            crate::native_projected_source::perspective_ratio(vector.position_z, a[14] as u32),
+        ) else {
             self.graph_layers.remove(&object);
             return false;
         };
-        let source=prepared.image;
-        let offset_x=(offset_x >> prepared.level).wrapping_add(prepared.anchor_shift);
-        let offset_y=offset_y >> prepared.level;
-        let scale_x=scale_x.wrapping_shl(prepared.level);
-        let scale_y=scale_y.wrapping_shl(prepared.level);
+        let source = prepared.image;
+        let offset_x = (offset_x >> prepared.level).wrapping_add(prepared.anchor_shift);
+        let offset_y = offset_y >> prepared.level;
+        let scale_x = scale_x.wrapping_shl(prepared.level);
+        let scale_y = scale_y.wrapping_shl(prepared.level);
         let (screen_width, screen_height) = snapshot::runtime_frame_size(self);
         let center = self.graph_config.center;
         let center = if native.use_graph_center != 0

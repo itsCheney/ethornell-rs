@@ -18,23 +18,42 @@ fn elapsed_ms_with_carry(delta_ns: u64, remainder: &mut u64) -> u64 {
 fn host_vm_budget(physical_bytes: Option<u64>) -> ethornell_vm::VmResourceBudget {
     ethornell_vm::VmResourceBudget {
         max_vm_count: 64,
-        max_memory_capacity_bytes: if physical_bytes.is_some_and(|bytes|bytes>=4*1024*1024*1024) {768*1024*1024} else {512*1024*1024},
+        max_memory_capacity_bytes: if physical_bytes
+            .is_some_and(|bytes| bytes >= 4 * 1024 * 1024 * 1024)
+        {
+            768 * 1024 * 1024
+        } else {
+            512 * 1024 * 1024
+        },
     }
 }
 fn host_physical_memory() -> Option<u64> {
-    #[cfg(any(target_os="android", target_os="ios"))]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        let pages=unsafe {libc::sysconf(libc::_SC_PHYS_PAGES)};
-        let size=unsafe {libc::sysconf(libc::_SC_PAGESIZE)};
-        if pages<=0 || size<=0 {return None;}
+        let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+        let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if pages <= 0 || size <= 0 {
+            return None;
+        }
         (pages as u64).checked_mul(size as u64)
     }
-    #[cfg(target_os="vita")]
-    {Some(512*1024*1024)}
-    #[cfg(target_os="horizon")]
-    {Some(4*1024*1024*1024)}
-    #[cfg(not(any(target_os="android",target_os="ios",target_os="vita",target_os="horizon")))]
-    {Some(4*1024*1024*1024)} // host diagnostic profile, not device RAM evidence
+    #[cfg(target_os = "vita")]
+    {
+        Some(512 * 1024 * 1024)
+    }
+    #[cfg(target_os = "horizon")]
+    {
+        Some(4 * 1024 * 1024 * 1024)
+    }
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "vita",
+        target_os = "horizon"
+    )))]
+    {
+        Some(4 * 1024 * 1024 * 1024)
+    } // host diagnostic profile, not device RAM evidence
 }
 
 // The candidate is borrowed from the JNI owner. Failure must drop it before
@@ -92,17 +111,31 @@ pub(super) struct HostServices {
     input_trace_count: u32,
 }
 impl HostServices {
-    pub(super) fn input_gate(&mut self,values:[u32;9]) {
-        if !self.enabled || !self.input_trace || self.input_trace_count>=64 {return;}
-        self.input_trace_count+=1;
-        let [pc,frame,event,payload,parameter,group,item,running,gate]=values;
+    pub(super) fn input_gate(&mut self, values: [u32; 9]) {
+        if !self.enabled || !self.input_trace || self.input_trace_count >= 64 {
+            return;
+        }
+        self.input_trace_count += 1;
+        let [
+            pc,
+            frame,
+            event,
+            payload,
+            parameter,
+            group,
+            item,
+            running,
+            gate,
+        ] = values;
         self.events.push_back(HostEvent {kind:1,request_id:0,code:1002,text:format!("input_gate pc={pc} frame={frame} event={event} payload={payload} parameter={parameter} group={group} item={item} running={running} gate={gate}")});
     }
-    pub(super) fn input_route(&mut self,values:[u32;7],bits:[bool;5]) {
-        if !self.enabled || !self.input_trace || self.input_trace_count>=64 {return;}
-        let [object,group,item,root,flags,current,pending]=values;
-        let [pointer,hit,press,up,event6]=bits;
-        self.input_trace_count+=1;
+    pub(super) fn input_route(&mut self, values: [u32; 7], bits: [bool; 5]) {
+        if !self.enabled || !self.input_trace || self.input_trace_count >= 64 {
+            return;
+        }
+        let [object, group, item, root, flags, current, pending] = values;
+        let [pointer, hit, press, up, event6] = bits;
+        self.input_trace_count += 1;
         self.events.push_back(HostEvent {kind:1,request_id:0,code:1001,text:format!("input_route object={object} group={group} item={item} root={root} flags={flags} current={current} pending={pending} pointer={} hit={} press={} up={} event6={}",u32::from(pointer),u32::from(hit),u32::from(press),u32::from(up),u32::from(event6))});
     }
     pub(super) fn unsupported(&mut self, capability: &str) {
@@ -179,11 +212,21 @@ impl HostRuntime {
         }
         let policy = file_policy::FilePolicy::new(&config.resource_root, &config.user_root)?;
         let writer_lock = policy.lock_writer()?;
-        policy.validate_resource_tree().map_err(|e| EthornellError::Other(format!("host_policy:301:{}",e.raw_os_error().unwrap_or(0))))?;
+        policy.validate_resource_tree().map_err(|e| {
+            EthornellError::Other(format!("host_policy:301:{}", e.raw_os_error().unwrap_or(0)))
+        })?;
         let font = match (config.font_data, config.font_path.as_deref()) {
-            (Some(bytes), _) => ethornell_render::FontProvider::load_bytes(bytes, config.font_face_index)?,
-            (None, Some(path)) => ethornell_render::FontProvider::load_file(path, config.font_face_index)?,
-            (None, None) => ethornell_render::FontProvider::load_system_for_text(if config.gbk {"A日本語中文简体繁體"} else {"A日本語中文"})?,
+            (Some(bytes), _) => {
+                ethornell_render::FontProvider::load_bytes(bytes, config.font_face_index)?
+            }
+            (None, Some(path)) => {
+                ethornell_render::FontProvider::load_file(path, config.font_face_index)?
+            }
+            (None, None) => ethornell_render::FontProvider::load_system_for_text(if config.gbk {
+                "A日本語中文简体繁體"
+            } else {
+                "A日本語中文"
+            })?,
         };
         let font = match &config.fallback_font {
             Some((path, face)) => ethornell_render::FallbackFont::new(
@@ -195,19 +238,33 @@ impl HostRuntime {
         #[cfg_attr(not(fd_policy), allow(unused_mut))]
         let mut manager = policy.open_manager()?;
         #[cfg(not(fd_policy))]
-        if config.launcher.as_deref().is_some_and(|name| !name.is_empty()) {
-            return Err(EthornellError::Other("launcher executables need host files".into()));
+        if config
+            .launcher
+            .as_deref()
+            .is_some_and(|name| !name.is_empty())
+        {
+            return Err(EthornellError::Other(
+                "launcher executables need host files".into(),
+            ));
         }
         #[cfg(fd_policy)]
         if let Some(launcher) = config.launcher.as_deref().filter(|name| !name.is_empty()) {
             if launcher.contains(['/', '\\']) {
-                return Err(EthornellError::Other("host_policy:130:0 launcher outside the game folder".into()));
+                return Err(EthornellError::Other(
+                    "host_policy:130:0 launcher outside the game folder".into(),
+                ));
             }
-            let file = policy.open_resource(launcher).map_err(|e| EthornellError::Other(format!("host_policy:131:{}", e.raw_os_error().unwrap_or(0))))?;
+            let file = policy.open_resource(launcher).map_err(|e| {
+                EthornellError::Other(format!("host_policy:131:{}", e.raw_os_error().unwrap_or(0)))
+            })?;
             if !manager.set_launcher_overlay(policy.resource.join(launcher), Box::new(file))? {
                 return Err(EthornellError::Other("launcher has no packed files".into()));
             }
-            tracing::info!(launcher, files = manager.launcher_overlay().map_or(0, |o| o.files().len()), "launcher overlay");
+            tracing::info!(
+                launcher,
+                files = manager.launcher_overlay().map_or(0, |o| o.files().len()),
+                "launcher overlay"
+            );
         }
         let bytes = manager.read_decoded_from_archive("system.arc", "ipl._bp")?;
         let mut runtime = file_policy::scope(&policy, || {
@@ -352,7 +409,12 @@ impl HostRuntime {
     }
     /// Attach a host-created renderer. Web creates it asynchronously; native
     /// consoles supply their platform GPU callbacks and the session font.
-    #[cfg(any(target_arch="wasm32",feature="console",target_os="vita",target_os="horizon"))]
+    #[cfg(any(
+        target_arch = "wasm32",
+        feature = "console",
+        target_os = "vita",
+        target_os = "horizon"
+    ))]
     pub fn attach_renderer(
         &mut self,
         renderer: Renderer<'static>,
@@ -405,19 +467,46 @@ impl HostRuntime {
             self.runtime.api.host.pending.len(),
             report.map(|r| r.program.as_str()),
             self.runtime.vm.resource_usage(),
-            self.runtime.api.graph_images.values().map(|i|i.rgba.len()).sum::<usize>(),
-            self.runtime.api.graph_blob_cache.values().map(Vec::len).sum::<usize>(),
+            self.runtime
+                .api
+                .graph_images
+                .values()
+                .map(|i| i.rgba.len())
+                .sum::<usize>(),
+            self.runtime
+                .api
+                .graph_blob_cache
+                .values()
+                .map(Vec::len)
+                .sum::<usize>(),
             self.runtime.api.program_cache.len(),
-            self.runtime.api.program_cache.values().map(|p|p.instructions.len()).sum::<usize>(),
+            self.runtime
+                .api
+                .program_cache
+                .values()
+                .map(|p| p.instructions.len())
+                .sum::<usize>(),
             self.runtime.vm.programs.len(),
-            self.runtime.vm.programs.iter().map(|p|p.instructions.len()).sum::<usize>(),
+            self.runtime
+                .vm
+                .programs
+                .iter()
+                .map(|p| p.instructions.len())
+                .sum::<usize>(),
         )
     }
     /// The game text font, for renderers the host builds itself.
     pub fn font(&self) -> FontArc {
         self.font.clone()
     }
-    #[cfg(any(target_os="android",target_os="ios",target_arch="wasm32",feature="console",target_os="vita",target_os="horizon"))]
+    #[cfg(any(
+        target_os = "android",
+        target_os = "ios",
+        target_arch = "wasm32",
+        feature = "console",
+        target_os = "vita",
+        target_os = "horizon"
+    ))]
     fn install_renderer(
         &mut self,
         mut renderer: Renderer<'static>,
@@ -494,7 +583,8 @@ impl HostRuntime {
     /// game coordinates, one step per engine frame) for unattended runs on
     /// hosts without environment variables.
     pub fn set_input_script(&mut self, source: &str) -> Result<()> {
-        self.input_script = Some(HeadlessInputScript::parse(source).map_err(EthornellError::Other)?);
+        self.input_script =
+            Some(HeadlessInputScript::parse(source).map_err(EthornellError::Other)?);
         Ok(())
     }
     pub fn input(&mut self, kind: u32, x: f32, y: f32, code: i32, value: f32) -> Result<()> {
@@ -562,35 +652,72 @@ impl HostRuntime {
         Ok(())
     }
     pub fn step(&mut self, now: u64) -> Result<()> {
-        self.scope(|this| this.step_inner(now).map_err(|error| {
-            let report=this.runtime.last_report.as_ref();
-            let reason=report.map(|r| match r.stop_reason {
-                ethornell_vm::VmStopReason::Completed=>1,
-                ethornell_vm::VmStopReason::Yielded=>2,
-                ethornell_vm::VmStopReason::SwitchedThread=>3,
-                ethornell_vm::VmStopReason::SchedulerPassEnded=>4,
-                ethornell_vm::VmStopReason::InterpreterTerminated=>5,
-                ethornell_vm::VmStopReason::WaitingForInput=>6,
-                ethornell_vm::VmStopReason::WaitingForInputOrTime=>7,
-                ethornell_vm::VmStopReason::WaitingForTime=>8,
-                ethornell_vm::VmStopReason::WaitingForProcedure=>9,
-                ethornell_vm::VmStopReason::WaitingForHost=>10,
-                ethornell_vm::VmStopReason::QuantumExhausted=>11,
-                ethornell_vm::VmStopReason::WatchdogExceeded=>12,
-                ethornell_vm::VmStopReason::UnknownOpcode=>13,
-                ethornell_vm::VmStopReason::UnknownDispatch=>14,
-                ethornell_vm::VmStopReason::Error=>15,
-            }).unwrap_or(0);
-            let opcode=this.runtime.api.last_native_call;
-            let cause=if error.to_string().contains("VM resource budget exceeded") {7} else {report.and_then(|r|r.recent_trace.iter().rev().find(|line|line.starts_with("error:") || line.starts_with("host response failed:"))).map(|line| {
-                if line.contains("unsupported") {1} else if line.contains("not found") || line.contains("missing") {2} else if line.contains("memory access out of bounds") {3} else if line.contains("stack underflow") {4} else if line.contains("font") || line.contains("glyph") {5} else if line.contains("audio") || line.contains("sound") {6} else if line.contains("budget") || line.contains("limit") {7} else {8}
-            }).unwrap_or(0)};
-            EthornellError::Other(format!("{error}; host_runtime_diag:{reason}:{}:{}:{}:{}:{cause}",
-                report.map(|r|r.pc as u64).unwrap_or(u64::MAX),
-                report.and_then(|r|r.offset).map(u64::from).unwrap_or(u64::MAX),
-                opcode.map(|o|u32::from(o.group)).unwrap_or(u32::MAX),
-                opcode.map(|o|u32::from(o.id)).unwrap_or(u32::MAX)))
-        }))
+        self.scope(|this| {
+            this.step_inner(now).map_err(|error| {
+                let report = this.runtime.last_report.as_ref();
+                let reason = report
+                    .map(|r| match r.stop_reason {
+                        ethornell_vm::VmStopReason::Completed => 1,
+                        ethornell_vm::VmStopReason::Yielded => 2,
+                        ethornell_vm::VmStopReason::SwitchedThread => 3,
+                        ethornell_vm::VmStopReason::SchedulerPassEnded => 4,
+                        ethornell_vm::VmStopReason::InterpreterTerminated => 5,
+                        ethornell_vm::VmStopReason::WaitingForInput => 6,
+                        ethornell_vm::VmStopReason::WaitingForInputOrTime => 7,
+                        ethornell_vm::VmStopReason::WaitingForTime => 8,
+                        ethornell_vm::VmStopReason::WaitingForProcedure => 9,
+                        ethornell_vm::VmStopReason::WaitingForHost => 10,
+                        ethornell_vm::VmStopReason::QuantumExhausted => 11,
+                        ethornell_vm::VmStopReason::WatchdogExceeded => 12,
+                        ethornell_vm::VmStopReason::UnknownOpcode => 13,
+                        ethornell_vm::VmStopReason::UnknownDispatch => 14,
+                        ethornell_vm::VmStopReason::Error => 15,
+                    })
+                    .unwrap_or(0);
+                let opcode = this.runtime.api.last_native_call;
+                let cause = if error.to_string().contains("VM resource budget exceeded") {
+                    7
+                } else {
+                    report
+                        .and_then(|r| {
+                            r.recent_trace.iter().rev().find(|line| {
+                                line.starts_with("error:")
+                                    || line.starts_with("host response failed:")
+                            })
+                        })
+                        .map(|line| {
+                            if line.contains("unsupported") {
+                                1
+                            } else if line.contains("not found") || line.contains("missing") {
+                                2
+                            } else if line.contains("memory access out of bounds") {
+                                3
+                            } else if line.contains("stack underflow") {
+                                4
+                            } else if line.contains("font") || line.contains("glyph") {
+                                5
+                            } else if line.contains("audio") || line.contains("sound") {
+                                6
+                            } else if line.contains("budget") || line.contains("limit") {
+                                7
+                            } else {
+                                8
+                            }
+                        })
+                        .unwrap_or(0)
+                };
+                EthornellError::Other(format!(
+                    "{error}; host_runtime_diag:{reason}:{}:{}:{}:{}:{cause}",
+                    report.map(|r| r.pc as u64).unwrap_or(u64::MAX),
+                    report
+                        .and_then(|r| r.offset)
+                        .map(u64::from)
+                        .unwrap_or(u64::MAX),
+                    opcode.map(|o| u32::from(o.group)).unwrap_or(u32::MAX),
+                    opcode.map(|o| u32::from(o.id)).unwrap_or(u32::MAX)
+                ))
+            })
+        })
     }
     fn step_inner(&mut self, now: u64) -> Result<()> {
         self.sync_audio()?;
@@ -686,7 +813,8 @@ impl HostRuntime {
             self.runtime.api.performance_profile.end(true);
         }
         renderer.render()?;
-        self.runtime.api.presentation_state = self.runtime
+        self.runtime.api.presentation_state =
+            self.runtime
                 .api
                 .clock_base_ms
                 .wrapping_add(self.runtime.api.engine_time_ms as u32) as i32;
@@ -722,7 +850,10 @@ impl HostRuntime {
     }
     /// The game's own screen size, which the renderer letterboxes.
     pub fn screen_size(&self) -> (i32, i32) {
-        (self.runtime.api.screen_width, self.runtime.api.screen_height)
+        (
+            self.runtime.api.screen_width,
+            self.runtime.api.screen_height,
+        )
     }
     pub fn poll_event(&mut self) -> Option<HostEvent> {
         self.runtime.api.host.events.pop_front()
@@ -819,7 +950,7 @@ impl RuntimeEngine {
     ) -> Self {
         let program = ethornell_script::parse_bp_program(Some(script.into()), bytes);
         let mut vm = ethornell_vm::Vm::new();
-        vm.set_native_abi_profile(confirmed_native_profile(&manager,bytes));
+        vm.set_native_abi_profile(confirmed_native_profile(&manager, bytes));
         vm.set_graph_text_encoding(encoding);
         vm.start(&program);
         Self {
@@ -859,51 +990,117 @@ mod tests {
             .unwrap()
             .unwrap();
         let event = api.host.events.pop_front().unwrap();
-        assert_eq!((event.kind, event.request_id, event.text.as_str()), (5, id, "select"));
+        assert_eq!(
+            (event.kind, event.request_id, event.text.as_str()),
+            (5, id, "select")
+        );
         assert_eq!(api.host.pending.get(&id), Some(&1));
-        let payload: serde_json::Value =
-            serde_json::from_str(&super::super::dialog_protocol::request_json(&api.host.dialogs[&id]))
-                .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(
+            &super::super::dialog_protocol::request_json(&api.host.dialogs[&id]),
+        )
+        .unwrap();
         assert_eq!(payload["options"][1], "B");
     }
 
     #[test]
     fn input_route_trace_is_opt_in_numeric_bounded_and_does_not_enable_vm_trace() {
-        let mut h=HostServices::default();h.enabled=true;
-        h.input_route([u32::MAX;7],[true;5]);assert!(h.events.is_empty());
-        h.input_trace=true;for _ in 0..100 {h.input_route([u32::MAX;7],[true;5]);}
-        assert_eq!(h.events.len(),64);
-        for e in &h.events {assert_eq!((e.kind,e.code,e.request_id),(1,1001,0));assert!(e.text.len()<=384);assert!(e.text.starts_with("input_route object=4294967295 group="));}
-        h.input_gate([u32::MAX;9]);assert_eq!(h.events.len(),64);
-        let mut gate=HostServices::default();gate.enabled=true;gate.input_trace=true;
-        gate.input_gate([u32::MAX;9]);assert_eq!(gate.events[0].code,1002);assert!(gate.events[0].text.len()<=384);
+        let mut h = HostServices::default();
+        h.enabled = true;
+        h.input_route([u32::MAX; 7], [true; 5]);
+        assert!(h.events.is_empty());
+        h.input_trace = true;
+        for _ in 0..100 {
+            h.input_route([u32::MAX; 7], [true; 5]);
+        }
+        assert_eq!(h.events.len(), 64);
+        for e in &h.events {
+            assert_eq!((e.kind, e.code, e.request_id), (1, 1001, 0));
+            assert!(e.text.len() <= 384);
+            assert!(e.text.starts_with("input_route object=4294967295 group="));
+        }
+        h.input_gate([u32::MAX; 9]);
+        assert_eq!(h.events.len(), 64);
+        let mut gate = HostServices::default();
+        gate.enabled = true;
+        gate.input_trace = true;
+        gate.input_gate([u32::MAX; 9]);
+        assert_eq!(gate.events[0].code, 1002);
+        assert!(gate.events[0].text.len() <= 384);
     }
     #[test]
     fn measured_workload_has_bounded_headroom_only_on_eligible_device_profile() {
-        let low=host_vm_budget(None);let small=host_vm_budget(Some(3*1024*1024*1024));let normal=host_vm_budget(Some(4*1024*1024*1024));
-        assert_eq!(low.max_memory_capacity_bytes,512*1024*1024);
-        assert_eq!(small.max_memory_capacity_bytes,low.max_memory_capacity_bytes);
-        assert_eq!(normal.max_memory_capacity_bytes,768*1024*1024);
-        assert_eq!(host_vm_budget(Some(u64::MAX)).max_memory_capacity_bytes,normal.max_memory_capacity_bytes);
-        assert!(normal.max_memory_capacity_bytes>648_441_292);
-        assert!(low.max_memory_capacity_bytes<648_441_292);
-        assert_eq!(normal.max_vm_count,64);
-        let vm=Vm::new();let usage=vm.resource_usage();
-        let capacity=usage.memory_capacity_bytes;
-        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity-1}).is_err());
-        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity}).is_ok());
-        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:0,..normal}).is_err());
+        let low = host_vm_budget(None);
+        let small = host_vm_budget(Some(3 * 1024 * 1024 * 1024));
+        let normal = host_vm_budget(Some(4 * 1024 * 1024 * 1024));
+        assert_eq!(low.max_memory_capacity_bytes, 512 * 1024 * 1024);
+        assert_eq!(
+            small.max_memory_capacity_bytes,
+            low.max_memory_capacity_bytes
+        );
+        assert_eq!(normal.max_memory_capacity_bytes, 768 * 1024 * 1024);
+        assert_eq!(
+            host_vm_budget(Some(u64::MAX)).max_memory_capacity_bytes,
+            normal.max_memory_capacity_bytes
+        );
+        assert!(normal.max_memory_capacity_bytes > 648_441_292);
+        assert!(low.max_memory_capacity_bytes < 648_441_292);
+        assert_eq!(normal.max_vm_count, 64);
+        let vm = Vm::new();
+        let usage = vm.resource_usage();
+        let capacity = usage.memory_capacity_bytes;
+        assert!(
+            vm.check_resource_budget(ethornell_vm::VmResourceBudget {
+                max_vm_count: 64,
+                max_memory_capacity_bytes: capacity - 1
+            })
+            .is_err()
+        );
+        assert!(
+            vm.check_resource_budget(ethornell_vm::VmResourceBudget {
+                max_vm_count: 64,
+                max_memory_capacity_bytes: capacity
+            })
+            .is_ok()
+        );
+        assert!(
+            vm.check_resource_budget(ethornell_vm::VmResourceBudget {
+                max_vm_count: 0,
+                ..normal
+            })
+            .is_err()
+        );
     }
     #[test]
     #[ignore = "requires an authorized read-only sample via ETHORNELL_RESTRICTED_REPRO_GAME; private temporary user root"]
     #[cfg(unix)]
     fn authorized_sample_restricted_vm_baseline() {
-        if std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){ethornell_core::init_tracing();}
-        let resource = PathBuf::from(std::env::var_os("ETHORNELL_RESTRICTED_REPRO_GAME").expect("explicit authorized sample required"));
-        let user = std::env::temp_dir().join(format!("ethornell-restricted-repro-user-{}", std::process::id()));
+        if std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some() {
+            ethornell_core::init_tracing();
+        }
+        let resource = PathBuf::from(
+            std::env::var_os("ETHORNELL_RESTRICTED_REPRO_GAME")
+                .expect("explicit authorized sample required"),
+        );
+        let user = std::env::temp_dir().join(format!(
+            "ethornell-restricted-repro-user-{}",
+            std::process::id()
+        ));
         std::fs::create_dir(&user).unwrap();
         let outcome = (|| -> Result<()> {
-            let mut host = HostRuntime::create(HostConfig {resource_root:resource,user_root:user.clone(),font_path:None,font_data:None,font_face_index:0,fallback_font:None,gbk:true,backend:0,strict:false,trace:false,silent:true,launcher:None})?;
+            let mut host = HostRuntime::create(HostConfig {
+                resource_root: resource,
+                user_root: user.clone(),
+                font_path: None,
+                font_data: None,
+                font_face_index: 0,
+                fallback_font: None,
+                gbk: true,
+                backend: 0,
+                strict: false,
+                trace: false,
+                silent: true,
+                launcher: None,
+            })?;
             // CPU-only VM/host-policy reproduction, not a Surface/GPU test.
             // It invokes the exact shared checked frontend under the same
             // scoped policy/font, with an explicit silent audio-free backend.
@@ -1049,29 +1246,47 @@ mod tests {
                 Value::Str("unused".into()),
                 Value::Str("insert disc".into()),
             ];
-            host.runtime.vm.run_loaded(&mut host.runtime.api, &VmRunOptions::default())
+            host.runtime
+                .vm
+                .run_loaded(&mut host.runtime.api, &VmRunOptions::default())
         };
         while host.poll_event().is_some() {}
-        assert_ne!(run(&mut host, "system.arc").stop_reason, VmStopReason::WaitingForHost);
+        assert_ne!(
+            run(&mut host, "system.arc").stop_reason,
+            VmStopReason::WaitingForHost
+        );
         let event = host.poll_event();
         assert!(event.is_none(), "{event:?}");
         assert_eq!(host.runtime.vm.stack, vec![Value::Int(1)]);
 
-        assert_eq!(run(&mut host, "late.dat").stop_reason, VmStopReason::WaitingForHost);
+        assert_eq!(
+            run(&mut host, "late.dat").stop_reason,
+            VmStopReason::WaitingForHost
+        );
         let event = host.poll_event().unwrap();
-        assert_eq!((event.kind, event.code, event.text.as_str()), (2, 1, "insert disc"));
+        assert_eq!(
+            (event.kind, event.code, event.text.as_str()),
+            (2, 1, "insert disc")
+        );
         host.complete_request(event.request_id, 1).unwrap();
         let again = host.poll_event().unwrap();
         assert_eq!((again.kind, again.request_id), (2, event.request_id));
         std::fs::write(root.join("resource/late.dat"), b"x").unwrap();
         host.complete_request(event.request_id, 1).unwrap();
-        host.runtime.vm.run_loaded(&mut host.runtime.api, &VmRunOptions::default());
+        host.runtime
+            .vm
+            .run_loaded(&mut host.runtime.api, &VmRunOptions::default());
         assert_eq!(host.runtime.vm.stack, vec![Value::Int(1)]);
 
-        assert_eq!(run(&mut host, "never.dat").stop_reason, VmStopReason::WaitingForHost);
+        assert_eq!(
+            run(&mut host, "never.dat").stop_reason,
+            VmStopReason::WaitingForHost
+        );
         let event = host.poll_event().unwrap();
         host.complete_request(event.request_id, 0).unwrap();
-        host.runtime.vm.run_loaded(&mut host.runtime.api, &VmRunOptions::default());
+        host.runtime
+            .vm
+            .run_loaded(&mut host.runtime.api, &VmRunOptions::default());
         assert_eq!(host.runtime.vm.stack, vec![Value::Int(0)]);
         drop(host);
         std::fs::remove_dir_all(root).unwrap();

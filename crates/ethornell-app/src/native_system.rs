@@ -3,8 +3,8 @@ use ethornell_vm::SysApi;
 
 #[derive(Default)]
 pub(super) struct NativeSystemState {
-    #[cfg(any(target_os="vita",target_os="horizon"))]
-    pub(super) mutex_names: BTreeMap<String,u64>,
+    #[cfg(any(target_os = "vita", target_os = "horizon"))]
+    pub(super) mutex_names: BTreeMap<String, u64>,
     pub(super) main_loop_wait_override: i32,
     pub(super) drag_drop_enabled: bool,
     pub(super) fullscreen_hotkeys_enabled: bool,
@@ -99,8 +99,10 @@ impl RuntimeTraceApi {
             0x27 => {
                 let from = pop_string_value(stack).unwrap_or_default();
                 let to = pop_string_value(stack).unwrap_or_default();
-                if let Some(policy)=file_policy::active() {
-                    return Some(Ok(ethornell_vm::Value::Int(i32::from(policy.rename(&from,&to).is_ok()))));
+                if let Some(policy) = file_policy::active() {
+                    return Some(Ok(ethornell_vm::Value::Int(i32::from(
+                        policy.rename(&from, &to).is_ok(),
+                    ))));
                 }
                 let ok = match (
                     runtime_file_path_from_root(&self.manager, &self.native_root, &from),
@@ -184,7 +186,11 @@ impl RuntimeTraceApi {
         max_count: usize,
         directories: bool,
     ) -> Vec<String> {
-        if let Some(policy) = file_policy::active() { return policy.enumerate_user(pattern, recursive, max_count, directories).unwrap_or_default(); }
+        if let Some(policy) = file_policy::active() {
+            return policy
+                .enumerate_user(pattern, recursive, max_count, directories)
+                .unwrap_or_default();
+        }
         let normalized = pattern.replace('\\', std::path::MAIN_SEPARATOR_STR);
         let pattern_path = Path::new(&normalized);
         let wildcard = pattern_path
@@ -226,8 +232,8 @@ const WIN32_ATTRIBUTE_XATTR: &[u8] = b"user.ethornell.win32-attributes\0";
 /// sets it on every write. A file with no bit left reports NORMAL (0x80).
 pub(super) fn win32_file_attributes(path: &Path) -> Option<u32> {
     let metadata = std::fs::metadata(path).ok()?;
-    let stored = read_win32_attribute_xattr(path)
-        .unwrap_or(if metadata.is_dir() { 0 } else { 0x20 });
+    let stored =
+        read_win32_attribute_xattr(path).unwrap_or(if metadata.is_dir() { 0 } else { 0x20 });
     let mut attrs = stored & WIN32_SETTABLE_ATTRIBUTES & !1;
     if metadata.permissions().readonly() {
         attrs |= 1;
@@ -269,7 +275,14 @@ fn read_win32_attribute_xattr(path: &Path) -> Option<u32> {
     let mut value = [0u8; 4];
     // SAFETY: valid NUL-terminated strings and a 4-byte buffer.
     let read = unsafe {
-        libc::getxattr(path.as_ptr(), WIN32_ATTRIBUTE_XATTR.as_ptr().cast(), value.as_mut_ptr().cast(), 4, 0, 0)
+        libc::getxattr(
+            path.as_ptr(),
+            WIN32_ATTRIBUTE_XATTR.as_ptr().cast(),
+            value.as_mut_ptr().cast(),
+            4,
+            0,
+            0,
+        )
     };
     (read == 4).then(|| u32::from_le_bytes(value))
 }
@@ -280,7 +293,12 @@ fn read_win32_attribute_xattr(path: &Path) -> Option<u32> {
     let mut value = [0u8; 4];
     // SAFETY: valid NUL-terminated strings and a 4-byte buffer.
     let read = unsafe {
-        libc::getxattr(path.as_ptr(), WIN32_ATTRIBUTE_XATTR.as_ptr().cast(), value.as_mut_ptr().cast(), 4)
+        libc::getxattr(
+            path.as_ptr(),
+            WIN32_ATTRIBUTE_XATTR.as_ptr().cast(),
+            value.as_mut_ptr().cast(),
+            4,
+        )
     };
     (read == 4).then(|| u32::from_le_bytes(value))
 }
@@ -291,7 +309,14 @@ fn write_win32_attribute_xattr(path: &Path, attrs: u32) {
         let value = attrs.to_le_bytes();
         // SAFETY: valid NUL-terminated strings and a 4-byte value.
         unsafe {
-            libc::setxattr(path.as_ptr(), WIN32_ATTRIBUTE_XATTR.as_ptr().cast(), value.as_ptr().cast(), 4, 0, 0);
+            libc::setxattr(
+                path.as_ptr(),
+                WIN32_ATTRIBUTE_XATTR.as_ptr().cast(),
+                value.as_ptr().cast(),
+                4,
+                0,
+                0,
+            );
         }
     }
 }
@@ -302,7 +327,13 @@ fn write_win32_attribute_xattr(path: &Path, attrs: u32) {
         let value = attrs.to_le_bytes();
         // SAFETY: valid NUL-terminated strings and a 4-byte value.
         unsafe {
-            libc::setxattr(path.as_ptr(), WIN32_ATTRIBUTE_XATTR.as_ptr().cast(), value.as_ptr().cast(), 4, 0);
+            libc::setxattr(
+                path.as_ptr(),
+                WIN32_ATTRIBUTE_XATTR.as_ptr().cast(),
+                value.as_ptr().cast(),
+                4,
+                0,
+            );
         }
     }
 }
@@ -333,7 +364,10 @@ pub(super) fn win32_copy_file(from: &Path, to: &Path) -> bool {
     if std::fs::copy(from, to).is_err() {
         return false;
     }
-    if let (Ok(modified), Ok(file)) = (source.modified(), std::fs::File::options().write(true).open(to)) {
+    if let (Ok(modified), Ok(file)) = (
+        source.modified(),
+        std::fs::File::options().write(true).open(to),
+    ) {
         let _ = file.set_modified(modified);
     }
     let stored = read_win32_attribute_xattr(from).unwrap_or(0x20) & !1;
@@ -423,7 +457,9 @@ fn enumerate_native_directory(
     directories: bool,
     output: &mut Vec<String>,
 ) {
-    if file_policy::restricted() && output.len()>=10_000 {return;}
+    if file_policy::restricted() && output.len() >= 10_000 {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };

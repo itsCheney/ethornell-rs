@@ -18,7 +18,9 @@ pub(crate) fn se_channel(value: i32) -> VmResult<()> {
 /// sub_498510: pan <= 0x80 (unsigned).
 pub(crate) fn pan(value: i32) -> VmResult<()> {
     if value as u32 > 0x80 {
-        return fail(format!("無効なパンポット（定位） [ {value} ] が指定されました"));
+        return fail(format!(
+            "無効なパンポット（定位） [ {value} ] が指定されました"
+        ));
     }
     Ok(())
 }
@@ -26,7 +28,9 @@ pub(crate) fn pan(value: i32) -> VmResult<()> {
 /// sub_498560: volume <= 0x80 (unsigned).
 pub(crate) fn volume(value: i32) -> VmResult<()> {
     if value as u32 > 0x80 {
-        return fail(format!("無効なボリューム（音量） [ {value} ] が指定されました"));
+        return fail(format!(
+            "無効なボリューム（音量） [ {value} ] が指定されました"
+        ));
     }
     Ok(())
 }
@@ -34,7 +38,9 @@ pub(crate) fn volume(value: i32) -> VmResult<()> {
 /// sub_4985B0: BGM channel < 0x10.
 pub(crate) fn bgm_channel(value: i32) -> VmResult<()> {
     if value as u32 >= 0x10 {
-        return fail(format!("無効な音楽チャンネル番号 [ {value} ] が指定されました"));
+        return fail(format!(
+            "無効な音楽チャンネル番号 [ {value} ] が指定されました"
+        ));
     }
     Ok(())
 }
@@ -50,7 +56,9 @@ pub(crate) fn division_count(value: i32) -> VmResult<()> {
 /// sub_4986D0: bitmap handle < 0x4000.
 pub(crate) fn bitmap(value: i32) -> VmResult<()> {
     if value as u32 >= 0x4000 {
-        return fail(format!("無効なビットマップ番号 [ {value} ] が指定されました"));
+        return fail(format!(
+            "無効なビットマップ番号 [ {value} ] が指定されました"
+        ));
     }
     Ok(())
 }
@@ -66,8 +74,11 @@ pub(crate) fn priority(value: i32) -> VmResult<()> {
 /// sub_4987B0: the blend/effect modes 0..=9, 0x20..=0x27, 0x40, 0x41,
 /// 0x80, 0xC0, 0xC1, 0xF0, 0xFF.
 pub(crate) fn effect_mode(value: i32) -> VmResult<()> {
-    if !matches!(value as u32, 0..=9 | 0x20..=0x27 | 0x40 | 0x41 | 0x80 | 0xC0 | 0xC1 | 0xF0 | 0xFF) {
-        return fail(format!("無効なエフェクトモード [ {value} ] が指定されました"));
+    if !matches!(value as u32, 0..=9 | 0x20..=0x27 | 0x40 | 0x41 | 0x80 | 0xC0 | 0xC1 | 0xF0 | 0xFF)
+    {
+        return fail(format!(
+            "無効なエフェクトモード [ {value} ] が指定されました"
+        ));
     }
     Ok(())
 }
@@ -75,7 +86,9 @@ pub(crate) fn effect_mode(value: i32) -> VmResult<()> {
 /// sub_4988C0: addition level -1..=256.
 pub(crate) fn addition_level(value: i32) -> VmResult<()> {
     if !(-1..=256).contains(&value) {
-        return fail(format!("無効なアディションレベル [ {value} ] が指定されました"));
+        return fail(format!(
+            "無効なアディションレベル [ {value} ] が指定されました"
+        ));
     }
     Ok(())
 }

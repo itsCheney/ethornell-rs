@@ -188,7 +188,14 @@ pub(crate) fn blit_alpha_over(
         }
         (2, 2) => {
             // sub_40B330.
-            for_each_pair(destination, source, x, y, |s, d| alpha_over_pair(s, d, None), alpha_over_scalar);
+            for_each_pair(
+                destination,
+                source,
+                x,
+                y,
+                |s, d| alpha_over_pair(s, d, None),
+                alpha_over_scalar,
+            );
             true
         }
         _ => false,
@@ -238,7 +245,9 @@ fn alpha_over_pair(s: &[u8; 8], d: &mut [u8; 8], scale: Option<u32>) {
     let mut out = [0u8; 8];
     for pixel in 0..2 {
         let base = pixel * 4;
-        let sa = factor.map_or(f32::from(s[base + 3]), |factor| f32::from(s[base + 3]) * factor);
+        let sa = factor.map_or(f32::from(s[base + 3]), |factor| {
+            f32::from(s[base + 3]) * factor
+        });
         let da = f32::from(d[base + 3]);
         let lower = da * 0.003_906_25 * (256.0 - sa);
         let total = lower + sa;
@@ -247,14 +256,22 @@ fn alpha_over_pair(s: &[u8; 8], d: &mut [u8; 8], scale: Option<u32>) {
             let value = reciprocal * part * 256.0;
             // cvttps2dq: NaN / out of range is 0x80000000, whose table
             // entry (index * 16 wraps) is entry 0.
-            if value.is_finite() && value.abs() < 2_147_483_648.0 { value as i32 as u32 & 0xFFFF } else { 0 }
+            if value.is_finite() && value.abs() < 2_147_483_648.0 {
+                value as i32 as u32 & 0xFFFF
+            } else {
+                0
+            }
         };
         let (ws, wd) = (weight(sa), weight(lower));
         for lane in 0..3 {
             let mixed = (u32::from(s[base + lane]) * ws + u32::from(d[base + lane]) * wd) & 0xffff;
             out[base + lane] = (mixed >> 8).min(255) as u8;
         }
-        let alpha = if total.is_finite() { total as i32 } else { i32::MIN };
+        let alpha = if total.is_finite() {
+            total as i32
+        } else {
+            i32::MIN
+        };
         out[base + 3] = (alpha as u16 as i16).clamp(0, 255) as u8;
     }
     *d = out;
@@ -317,21 +334,28 @@ pub(crate) fn blit_alpha_over_parameter(
         }
         (2, 2) => {
             // sub_40BD00: SSE pairs, the odd last pixel in integers.
-            for_each_pair(destination, source, x, y, |s, d| alpha_over_pair(s, d, Some(coverage)), |s, d| {
-                if s[3] == 0 {
-                    return;
-                }
-                let cov = coverage * u32::from(s[3]);
-                let dst_part = (u32::from(d[3]) * (0x10000 - cov)) >> 8;
-                let total = dst_part + cov;
-                let wd = (dst_part << 8) / total;
-                let ws = (cov << 8) / total;
-                for lane in 0..3 {
-                    let mixed = (u32::from(d[lane]) * wd + u32::from(s[lane]) * ws) & 0xffff;
-                    d[lane] = (mixed >> 8).min(255) as u8;
-                }
-                d[3] = ((total >> 8) & 0xff) as u8;
-            });
+            for_each_pair(
+                destination,
+                source,
+                x,
+                y,
+                |s, d| alpha_over_pair(s, d, Some(coverage)),
+                |s, d| {
+                    if s[3] == 0 {
+                        return;
+                    }
+                    let cov = coverage * u32::from(s[3]);
+                    let dst_part = (u32::from(d[3]) * (0x10000 - cov)) >> 8;
+                    let total = dst_part + cov;
+                    let wd = (dst_part << 8) / total;
+                    let ws = (cov << 8) / total;
+                    for lane in 0..3 {
+                        let mixed = (u32::from(d[lane]) * wd + u32::from(s[lane]) * ws) & 0xffff;
+                        d[lane] = (mixed >> 8).min(255) as u8;
+                    }
+                    d[3] = ((total >> 8) & 0xff) as u8;
+                },
+            );
             true
         }
         _ => false,
@@ -1144,11 +1168,25 @@ mod tests {
         assert_eq!(&dst.rgba[8..11], &[100, 100, 100]);
         // ... and k = 127 copies the colour with the fourth byte cleared.
         let mut dst = image(&[[100, 100, 100, 9]]);
-        assert!(blit_alpha_over(&mut dst, 1, &image(&[[200, 0, 50, 255]]), 2, 0, 0));
+        assert!(blit_alpha_over(
+            &mut dst,
+            1,
+            &image(&[[200, 0, 50, 255]]),
+            2,
+            0,
+            0
+        ));
         assert_eq!(dst.rgba, [200, 0, 50, 0]);
         // A pair with both alphas >= 254 is copied raw.
         let mut dst = image(&[[100, 100, 100, 9]; 2]);
-        assert!(blit_alpha_over(&mut dst, 1, &image(&[[200, 0, 50, 254], [1, 2, 3, 255]]), 2, 0, 0));
+        assert!(blit_alpha_over(
+            &mut dst,
+            1,
+            &image(&[[200, 0, 50, 254], [1, 2, 3, 255]]),
+            2,
+            0,
+            0
+        ));
         assert_eq!(dst.rgba, [200, 0, 50, 254, 1, 2, 3, 255]);
     }
 

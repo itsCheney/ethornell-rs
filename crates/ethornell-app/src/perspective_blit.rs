@@ -145,9 +145,16 @@ fn snap(value: f64) -> f64 {
 }
 
 /// 40EB10's snapped, inclusive raster bounds.
-pub(crate) fn bounds(corners:&[Corner;4])->[i32;4] {
-    let axis=|axis,minimum| {let values=corners.iter().map(|c|snap(c[axis] as f64));if minimum {values.fold(f64::INFINITY,f64::min).floor() as i32}else{values.fold(f64::NEG_INFINITY,f64::max).ceil() as i32}};
-    [axis(0,true),axis(1,true),axis(0,false),axis(1,false)]
+pub(crate) fn bounds(corners: &[Corner; 4]) -> [i32; 4] {
+    let axis = |axis, minimum| {
+        let values = corners.iter().map(|c| snap(c[axis] as f64));
+        if minimum {
+            values.fold(f64::INFINITY, f64::min).floor() as i32
+        } else {
+            values.fold(f64::NEG_INFINITY, f64::max).ceil() as i32
+        }
+    };
+    [axis(0, true), axis(1, true), axis(0, false), axis(1, false)]
 }
 
 /// One side of the quad as sub_40EB10 walks it: the current edge's end

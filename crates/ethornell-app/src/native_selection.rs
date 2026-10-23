@@ -243,7 +243,10 @@ impl RuntimeTraceApi {
         let scope = state.scope;
         let window = state.request.window;
         let icon = matches!(state.request.data, NativeSelectionData::Icons { .. });
-        let full_input = match &state.request.data {NativeSelectionData::Items {..}=>true,NativeSelectionData::Icons {input_mode,..}=>*input_mode==3};
+        let full_input = match &state.request.data {
+            NativeSelectionData::Items { .. } => true,
+            NativeSelectionData::Icons { input_mode, .. } => *input_mode == 3,
+        };
         let window_input = match &state.request.data {
             NativeSelectionData::Items { .. } => true,
             NativeSelectionData::Icons { input_mode, .. } => *input_mode != 0,
@@ -252,12 +255,19 @@ impl RuntimeTraceApi {
         let focus = self.selection_focus_eligible(scope as u32);
         let keyboard = native_keyboard_scope_eligible(self, scope);
         let mut bits = if window_input {
-            query_runtime_input_event_bits_split(self,if full_input {scope}else{0},scope,true) as u32 & 0x7fff_ffff
+            query_runtime_input_event_bits_split(
+                self,
+                if full_input { scope } else { 0 },
+                scope,
+                true,
+            ) as u32
+                & 0x7fff_ffff
         } else {
             0
         };
         if let Some(vscope) = virtual_scope {
-            bits |= query_runtime_input_event_bits_split(self,0,vscope,true) as u32 & 0x7fff_ffff;
+            bits |=
+                query_runtime_input_event_bits_split(self, 0, vscope, true) as u32 & 0x7fff_ffff;
         }
         let mut state = self.native_selections.states.remove(&id).unwrap();
         let pointer_eligible =
@@ -293,7 +303,7 @@ impl RuntimeTraceApi {
                 {
                     if let Some(index) = keys.iter().position(|key| {
                         drain_native_input_descriptor(self, *key) != 0
-                            || crate::native_input_chain::native_action_descriptor_bit(bits,*key)
+                            || crate::native_input_chain::native_action_descriptor_bit(bits, *key)
                     }) {
                         self.update_selection_icon(&mut state, index as i32);
                         state.local = [0, 0];
@@ -438,18 +448,24 @@ impl RuntimeTraceApi {
     }
 
     pub(super) fn selection_focus_eligible(&self, scope: u32) -> bool {
-        self.icon_input_focus_eligible(scope) && self.native_selections
-            .states
-            .values()
-            .filter(|p| p.focus)
-            .all(|p| scope >= p.scope as u32)
+        self.icon_input_focus_eligible(scope)
+            && self
+                .native_selections
+                .states
+                .values()
+                .filter(|p| p.focus)
+                .all(|p| scope >= p.scope as u32)
     }
 
-    pub(super) fn selection_pointer_nodes_at(&self,point:Option<(f32,f32)>) -> Vec<(u32, bool)> {
+    pub(super) fn selection_pointer_nodes_at(&self, point: Option<(f32, f32)>) -> Vec<(u32, bool)> {
         let Some((x, y)) = point else {
             return Vec::new();
         };
-        if x < 0.0 || y < 0.0 || x >= snapshot::runtime_frame_size(self).0 as f32 || y >= snapshot::runtime_frame_size(self).1 as f32 {
+        if x < 0.0
+            || y < 0.0
+            || x >= snapshot::runtime_frame_size(self).0 as f32
+            || y >= snapshot::runtime_frame_size(self).1 as f32
+        {
             return Vec::new();
         }
         let mut nodes = Vec::new();
@@ -460,7 +476,7 @@ impl RuntimeTraceApi {
             for item in &state.virtuals {
                 nodes.push((
                     item.scope,
-                    self.selection_virtual_hit_at(state.request.window, item,point)
+                    self.selection_virtual_hit_at(state.request.window, item, point)
                         .is_some(),
                 ));
             }
@@ -469,11 +485,16 @@ impl RuntimeTraceApi {
     }
 
     fn selection_virtual_hit(&self, window: i32, item: &VirtualItem) -> Option<[i32; 2]> {
-        self.selection_virtual_hit_at(window,item,self.mouse_pos)
+        self.selection_virtual_hit_at(window, item, self.mouse_pos)
     }
 
-    fn selection_virtual_hit_at(&self, window:i32,item:&VirtualItem,point:Option<(f32,f32)>)->Option<[i32;2]> {
-        let (x,y)=point?;
+    fn selection_virtual_hit_at(
+        &self,
+        window: i32,
+        item: &VirtualItem,
+        point: Option<(f32, f32)>,
+    ) -> Option<[i32; 2]> {
+        let (x, y) = point?;
         let (wx, wy) = self.surface_world_position(window);
         let px = (x as i32)
             .wrapping_sub(wx as i32)

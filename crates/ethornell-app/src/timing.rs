@@ -15,7 +15,6 @@ pub(crate) fn duration_ms_to_ticks(duration_ms: i32) -> u32 {
     (duration_ms as u32).div_ceil(NATIVE_TICK_MS as u32)
 }
 
-
 /// Convert a wall-clock delta into target-style engine elapsed time.
 ///
 /// sub_499290 treats a wall-clock jump larger than dword_503DE8 (initially

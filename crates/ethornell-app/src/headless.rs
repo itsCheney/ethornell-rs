@@ -2,15 +2,38 @@ use std::collections::VecDeque;
 
 #[derive(Clone, Debug)]
 pub enum HeadlessInputEvent {
-    MouseMove { x: f32, y: f32 },
-    MousePress { x: f32, y: f32 },
-    MouseRelease { x: f32, y: f32 },
-    MouseWheel { delta_y: f32 },
-    KeyPress { key: String },
-    KeyRelease { key: String },
+    MouseMove {
+        x: f32,
+        y: f32,
+    },
+    MousePress {
+        x: f32,
+        y: f32,
+    },
+    MouseRelease {
+        x: f32,
+        y: f32,
+    },
+    MouseWheel {
+        delta_y: f32,
+    },
+    KeyPress {
+        key: String,
+    },
+    KeyRelease {
+        key: String,
+    },
     /// Right (2), middle (4) and X1/X2 (5/6) buttons as target descriptors.
-    ButtonPress { button: i32, x: f32, y: f32 },
-    ButtonRelease { button: i32, x: f32, y: f32 },
+    ButtonPress {
+        button: i32,
+        x: f32,
+        y: f32,
+    },
+    ButtonRelease {
+        button: i32,
+        x: f32,
+        y: f32,
+    },
 }
 
 #[derive(Clone, Debug)]

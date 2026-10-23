@@ -254,7 +254,7 @@ mod tests {
         };
         let object = call(&mut api, 0x50, &[]).as_i32();
         call(&mut api, 0x56, &[object, 0, 0, 100, 0, 0, 0]);
-        call(&mut api,0x54,&[object,1]);
+        call(&mut api, 0x54, &[object, 1]);
         call(
             &mut api,
             0x38,

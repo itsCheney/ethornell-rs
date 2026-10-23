@@ -173,11 +173,18 @@ impl LandscapeRaster {
 impl RuntimeTraceApi {
     /// Records a failed part/pillar index (sub_41C3F0) and returns the text
     /// sub_483C20 / sub_484060 format from it.
-    fn landscape_detail_error(&mut self, object: i32, detail: i32, text: &str) -> ethornell_vm::VmError {
+    fn landscape_detail_error(
+        &mut self,
+        object: i32,
+        detail: i32,
+        text: &str,
+    ) -> ethornell_vm::VmError {
         if let Some(state) = self.graph91_landscapes.get_mut(&object) {
             state.error_detail = detail;
         }
-        landscape_error(format!("{text} [ {detail} ] に無効な情報が指定されています"))
+        landscape_error(format!(
+            "{text} [ {detail} ] に無効な情報が指定されています"
+        ))
     }
     /// sub_483C20 -> sub_4403C0 -> sub_421C60: zero part count (2) and zero
     /// pillar count (3) report index -1, then the bitmap (1), each part
@@ -633,7 +640,9 @@ impl RuntimeTraceApi {
                 continue;
             }
             let index = py as usize * column.image.width as usize + px as usize;
-            let pixel = column.image.rgba[index * 4..index * 4 + 4].try_into().unwrap();
+            let pixel = column.image.rgba[index * 4..index * 4 + 4]
+                .try_into()
+                .unwrap();
             let alpha = if mode == 1 {
                 column
                     .hit
@@ -699,17 +708,12 @@ mod tests {
             &[0, 0, 2, 2, 0, 2, 0, 2, 2, 0],
             1,
             2,
-            &columns
-        ).unwrap();
+            &columns,
+        )
+        .unwrap();
         api.graph_resources.remove(&100);
         api.graph_images.remove("runtime:bitmap:100");
-        GraphApi::configure_graph91_landscape_map(
-            &mut api,
-            object,
-            2,
-            1,
-            &[0, 1]
-        ).unwrap();
+        GraphApi::configure_graph91_landscape_map(&mut api, object, 2, 1, &[0, 1]).unwrap();
         call(&mut api, 0x75, &[object, 0, 0, 1, 0, 5]);
         api.refresh_native_filters();
         let frame = snapshot::compose_runtime_frame(&api, false);
@@ -721,7 +725,10 @@ mod tests {
         );
         api.mouse_pos = Some((3., 1.));
         assert_eq!(api.native_landscape_hit(object, 0), Some([1, 0]));
-        assert_eq!(api.graph91_landscape_cell_value(object, 0, 0).unwrap(), Some(5));
+        assert_eq!(
+            api.graph91_landscape_cell_value(object, 0, 0).unwrap(),
+            Some(5)
+        );
         call(&mut api, 0x7c, &[object, 0, 1]);
         api.refresh_native_filters();
         assert_eq!(
@@ -742,21 +749,9 @@ mod tests {
             },
             2,
         );
-        GraphApi::configure_graph91_landscape_guides(
-            &mut api,
-            object,
-            101,
-            1,
-            &[0, 0, 1, 1, 0]
-        ).unwrap();
-        GraphApi::set_graph91_landscape_cell_guides(
-            &mut api,
-            object,
-            &[0, 0],
-            0,
-            0,
-            0
-        ).unwrap();
+        GraphApi::configure_graph91_landscape_guides(&mut api, object, 101, 1, &[0, 0, 1, 1, 0])
+            .unwrap();
+        GraphApi::set_graph91_landscape_cell_guides(&mut api, object, &[0, 0], 0, 0, 0).unwrap();
         api.graph_resources.remove(&101);
         api.refresh_native_filters();
         assert_eq!(
@@ -779,7 +774,10 @@ mod tests {
         let object = GraphApi::call_graph(
             &mut api,
             &mut NativeCallFrame::new(
-                NativeOpcode { group: 0x91, id: 0x70 },
+                NativeOpcode {
+                    group: 0x91,
+                    id: 0x70,
+                },
                 [2, 1, 1, 2, 1, 0].map(Value::Int).to_vec(),
             ),
         )
@@ -787,34 +785,76 @@ mod tests {
         .as_i32();
         let text = |result: ethornell_vm::VmResult<()>| result.unwrap_err().to_string();
         // sub_421C60: zero part count reports index -1 before the bitmap.
-        assert!(text(GraphApi::configure_graph91_landscape_parts(
-            &mut api, object, 999, 0, &[], 0, 1, &[0; 34]
-        ))
-        .contains("部品番号 [ -1 ] に無効な情報が指定されています"));
-        assert!(text(GraphApi::configure_graph91_landscape_parts(
-            &mut api, object, 999, 1, &[0, 0, 1, 1, 0], 0, 1, &[0; 34]
-        ))
-        .contains("指定されたビットマップ [ 999 ] は存在しません"));
+        assert!(
+            text(GraphApi::configure_graph91_landscape_parts(
+                &mut api,
+                object,
+                999,
+                0,
+                &[],
+                0,
+                1,
+                &[0; 34]
+            ))
+            .contains("部品番号 [ -1 ] に無効な情報が指定されています")
+        );
+        assert!(
+            text(GraphApi::configure_graph91_landscape_parts(
+                &mut api,
+                object,
+                999,
+                1,
+                &[0, 0, 1, 1, 0],
+                0,
+                1,
+                &[0; 34]
+            ))
+            .contains("指定されたビットマップ [ 999 ] は存在しません")
+        );
         // sub_422190: no pillars wins over a bad size.
-        assert!(text(GraphApi::configure_graph91_landscape_map(&mut api, object, 0, 0, &[]))
-            .contains("柱が設定されていません"));
-        assert!(text(GraphApi::configure_graph91_landscape_guides(
-            &mut api, object, 999, 0, &[]
-        ))
-        .contains("部品番号 [ -1 ]"));
+        assert!(
+            text(GraphApi::configure_graph91_landscape_map(
+                &mut api,
+                object,
+                0,
+                0,
+                &[]
+            ))
+            .contains("柱が設定されていません")
+        );
+        assert!(
+            text(GraphApi::configure_graph91_landscape_guides(
+                &mut api,
+                object,
+                999,
+                0,
+                &[]
+            ))
+            .contains("部品番号 [ -1 ]")
+        );
         // sub_4229B0 reports the missing map before the layer.
-        assert!(text(GraphApi::set_graph91_landscape_cell_guides(
-            &mut api, object, &[0, 0], 9, 0, 0
-        ))
-        .contains("マップが設定されていません"));
-        assert!(api
-            .graph91_landscape_cell_value(object, 0, 0)
-            .unwrap_err()
-            .to_string()
-            .contains("マップが設定されていません"));
-        assert!(GraphApi::graph91_landscape_hit_test(&api, 0x1234, 0)
-            .unwrap_err()
-            .to_string()
-            .contains("無効なランドスケープハンドル"));
+        assert!(
+            text(GraphApi::set_graph91_landscape_cell_guides(
+                &mut api,
+                object,
+                &[0, 0],
+                9,
+                0,
+                0
+            ))
+            .contains("マップが設定されていません")
+        );
+        assert!(
+            api.graph91_landscape_cell_value(object, 0, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("マップが設定されていません")
+        );
+        assert!(
+            GraphApi::graph91_landscape_hit_test(&api, 0x1234, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("無効なランドスケープハンドル")
+        );
     }
 }

@@ -52,7 +52,8 @@ impl RuntimeTraceApi {
                         "無効な波紋タイプ [ {mode} ] が指定されました"
                     ))));
                 }
-                self.effects.generate_ripple_map(bitmap, mode, center_x, center_y, period);
+                self.effects
+                    .generate_ripple_map(bitmap, mode, center_x, center_y, period);
                 ethornell_vm::Value::None
             }
             0x11 => {
@@ -113,7 +114,8 @@ impl RuntimeTraceApi {
                             cache.lookup(Some(&archive), Some(name), now).is_some()
                         });
                         if !hit
-                            && let Some(entry) = find_runtime_resource(&self.manager, &archive, name)
+                            && let Some(entry) =
+                                find_runtime_resource(&self.manager, &archive, name)
                             && let Ok(bytes) = self.manager.read_by_entry_raw(&entry)
                             && let Some(cache) = self.graph_dc_cache.as_mut()
                         {
@@ -126,7 +128,8 @@ impl RuntimeTraceApi {
                 if loaded && let Some(image) = self.graph_images.get(&key) {
                     let format = self.graph_image_formats.get(&key).copied().unwrap_or(2);
                     let bytes = crate::preload_image_buffer(image, format);
-                    let archive_key = (!archive.starts_with('0')).then(|| archive.to_ascii_lowercase());
+                    let archive_key =
+                        (!archive.starts_with('0')).then(|| archive.to_ascii_lowercase());
                     self.graph_blob_cache
                         .entry((archive_key, spec.to_ascii_lowercase()))
                         .or_insert(bytes);
@@ -167,28 +170,74 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::Int(i32::from(self.invert_system92_alpha_bitmap(bitmap)))
             }
             0x1a => {
-                let mut args=pop_args(stack,6).iter().map(value_to_i32).collect::<Vec<_>>();args.reverse();
-                if let Err(error)=self.execute_bitmap_transform(0x92,id,&args) {return Some(Err(error));}
+                let mut args = pop_args(stack, 6)
+                    .iter()
+                    .map(value_to_i32)
+                    .collect::<Vec<_>>();
+                args.reverse();
+                if let Err(error) = self.execute_bitmap_transform(0x92, id, &args) {
+                    return Some(Err(error));
+                }
                 ethornell_vm::Value::None
             }
             0x1c | 0x1d => {
-                let mut source=pop_args(stack,if id==0x1c {10}else{11});source.reverse();
-                let int=|i:usize|source.get(i).map(value_to_i32).unwrap_or_default();
-                let (bitmap,x,y,font,size,width_percent)=(int(0),int(1),int(2),int(4),int(5),int(6));
+                let mut source = pop_args(stack, if id == 0x1c { 10 } else { 11 });
+                source.reverse();
+                let int = |i: usize| source.get(i).map(value_to_i32).unwrap_or_default();
+                let (bitmap, x, y, font, size, width_percent) =
+                    (int(0), int(1), int(2), int(4), int(5), int(6));
                 // sub_4866A0 / sub_486850: sub_4986D0, sub_498660, then
                 // sub_403600 / sub_403680: bitmap, size, width.
-                let fail=|text:String|Some(Err(ethornell_vm::VmError::Runtime(text)));
-                if let Err(error)=target_checks::bitmap(bitmap) {return Some(Err(error));}
-                if self.native_user.font_face(font).is_none() {return fail(format!("無効なフォント番号 [ {font} ] が指定されました"));}
-                let Some(mut image)=self.graph_bitmap_image(bitmap) else{return fail(format!("指定されたビットマップ [ {bitmap} ] は存在しません"));};
-                if !(4..=200).contains(&size) {return fail(format!("指定されたフォントサイズ [ {size} ] は無効です"));}
-                if !(25..=200).contains(&width_percent) {return fail(format!("指定されたフォント幅 [ {width_percent} ] は無効です"));}
-                let text=source.get(3).and_then(value_to_string).unwrap_or_default();
-                let bytes=encoding_rs::SHIFT_JIS.encode(&text).0.into_owned();
-                let (glyphs,result)=snapshot::layout_styled_bitmap_text(&bytes,[x,y],size as u32,width_percent,int(7)!=0,int(8)!=0,int(9) as u32,id==0x1d,if id==0x1d {int(10)}else{0},[image.width,image.height]);
-                let format=self.bitmap_formats.get(&bitmap).copied().unwrap_or(2);
-                for glyph in &glyphs {crate::bitmap_blend::blit_mode(&mut image,format,&glyph.cell,2,glyph.x,glyph.y,0,0);}
-                if !glyphs.is_empty()&&self.replace_graph_bitmap_pixels(bitmap,image) {self.clear_bitmap_text(bitmap);}
+                let fail = |text: String| Some(Err(ethornell_vm::VmError::Runtime(text)));
+                if let Err(error) = target_checks::bitmap(bitmap) {
+                    return Some(Err(error));
+                }
+                if self.native_user.font_face(font).is_none() {
+                    return fail(format!("無効なフォント番号 [ {font} ] が指定されました"));
+                }
+                let Some(mut image) = self.graph_bitmap_image(bitmap) else {
+                    return fail(format!(
+                        "指定されたビットマップ [ {bitmap} ] は存在しません"
+                    ));
+                };
+                if !(4..=200).contains(&size) {
+                    return fail(format!("指定されたフォントサイズ [ {size} ] は無効です"));
+                }
+                if !(25..=200).contains(&width_percent) {
+                    return fail(format!(
+                        "指定されたフォント幅 [ {width_percent} ] は無効です"
+                    ));
+                }
+                let text = source.get(3).and_then(value_to_string).unwrap_or_default();
+                let bytes = encoding_rs::SHIFT_JIS.encode(&text).0.into_owned();
+                let (glyphs, result) = snapshot::layout_styled_bitmap_text(
+                    &bytes,
+                    [x, y],
+                    size as u32,
+                    width_percent,
+                    int(7) != 0,
+                    int(8) != 0,
+                    int(9) as u32,
+                    id == 0x1d,
+                    if id == 0x1d { int(10) } else { 0 },
+                    [image.width, image.height],
+                );
+                let format = self.bitmap_formats.get(&bitmap).copied().unwrap_or(2);
+                for glyph in &glyphs {
+                    crate::bitmap_blend::blit_mode(
+                        &mut image,
+                        format,
+                        &glyph.cell,
+                        2,
+                        glyph.x,
+                        glyph.y,
+                        0,
+                        0,
+                    );
+                }
+                if !glyphs.is_empty() && self.replace_graph_bitmap_pixels(bitmap, image) {
+                    self.clear_bitmap_text(bitmap);
+                }
                 ethornell_vm::Value::Int(result)
             }
             0x1e => {
@@ -213,7 +262,9 @@ impl RuntimeTraceApi {
                     .query_bitmap_info(bitmap)
                     .and_then(|_| self.graph_bitmap_image(bitmap))
                 else {
-                    return fail(format!("指定されたビットマップ [ {bitmap} ] は存在しません"));
+                    return fail(format!(
+                        "指定されたビットマップ [ {bitmap} ] は存在しません"
+                    ));
                 };
                 // sub_42F8D0 accepts heights 8..=200.
                 if (size - 8) as u32 > 0xC0 {
@@ -235,7 +286,14 @@ impl RuntimeTraceApi {
                     let format = self.bitmap_formats.get(&bitmap).copied().unwrap_or(2);
                     for glyph in &glyphs {
                         crate::bitmap_blend::blit_mode(
-                            &mut image, format, &glyph.cell, 2, glyph.x, glyph.y, 0, 0,
+                            &mut image,
+                            format,
+                            &glyph.cell,
+                            2,
+                            glyph.x,
+                            glyph.y,
+                            0,
+                            0,
                         );
                     }
                     if self.replace_graph_bitmap_pixels(bitmap, image) {
@@ -279,7 +337,9 @@ impl RuntimeTraceApi {
         if Self::is_window_surface_handle(window) && self.graph_surfaces.contains_key(&window) {
             Ok(())
         } else {
-            Err(ethornell_vm::VmError::Runtime("無効なウィンドウハンドルが指定されました".into()))
+            Err(ethornell_vm::VmError::Runtime(
+                "無効なウィンドウハンドルが指定されました".into(),
+            ))
         }
     }
 
@@ -310,10 +370,9 @@ impl RuntimeTraceApi {
                 "指定されたビットマップ [ {bitmap} ] は存在しません"
             )));
         };
-        let (width, height) = self
-            .graph_surfaces
-            .get(&window)
-            .map_or((0, 0), |surface| (surface.width as i32, surface.height as i32));
+        let (width, height) = self.graph_surfaces.get(&window).map_or((0, 0), |surface| {
+            (surface.width as i32, surface.height as i32)
+        });
         let overlaps = x < width
             && y < height
             && x.saturating_add(info.width as i32) > 0

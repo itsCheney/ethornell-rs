@@ -9,7 +9,10 @@ use std::{
 // Bounded, non-secret diagnostics. Do not embed any user path or upstream IO
 // message: the ABI may safely expose this numeric stage and errno only.
 fn policy_error(code: u32, error: io::Error) -> io::Error {
-    io::Error::new(error.kind(), format!("host_policy:{code}:{}", error.raw_os_error().unwrap_or(0)))
+    io::Error::new(
+        error.kind(),
+        format!("host_policy:{code}:{}", error.raw_os_error().unwrap_or(0)),
+    )
 }
 
 /// What the policy reports about a name (std::fs::Metadata has no portable
@@ -21,14 +24,26 @@ pub(crate) struct PolicyMetadata {
     readonly: bool,
 }
 impl PolicyMetadata {
-    pub fn is_file(&self) -> bool { !self.is_dir }
-    pub fn is_dir(&self) -> bool { self.is_dir }
-    pub fn len(&self) -> u64 { self.len }
-    pub fn readonly(&self) -> bool { self.readonly }
+    pub fn is_file(&self) -> bool {
+        !self.is_dir
+    }
+    pub fn is_dir(&self) -> bool {
+        self.is_dir
+    }
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+    pub fn readonly(&self) -> bool {
+        self.readonly
+    }
 }
 impl From<std::fs::Metadata> for PolicyMetadata {
     fn from(m: std::fs::Metadata) -> Self {
-        Self { is_dir: m.is_dir(), len: m.len(), readonly: m.permissions().readonly() }
+        Self {
+            is_dir: m.is_dir(),
+            len: m.len(),
+            readonly: m.permissions().readonly(),
+        }
     }
 }
 /// Held for the session: the host's exclusive claim on the user root.
@@ -92,10 +107,12 @@ fn relative(name: &str) -> Option<PathBuf> {
 // arbitrary resource-root names remain read-only. It never denotes host IO in
 // the resource directory and never imports original save bytes.
 pub(crate) fn user_data_alias(name: &str) -> String {
-    let normalized=name.replace('\\',"/");
-    if let Some(rest)=normalized.strip_prefix("bgi-resource/") {
-        let first=rest.split('/').next().unwrap_or("");
-        if first.eq_ignore_ascii_case("UserData") {return format!("bgi-user/{rest}");}
+    let normalized = name.replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix("bgi-resource/") {
+        let first = rest.split('/').next().unwrap_or("");
+        if first.eq_ignore_ascii_case("UserData") {
+            return format!("bgi-user/{rest}");
+        }
     }
     normalized
 }
@@ -389,9 +406,10 @@ impl FilePolicy {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
         if std::ptr::eq(root, &*self.resource_dir)
-            && self.resource_hidden.as_deref().is_some_and(|hidden| {
-                parts[0].as_bytes().eq_ignore_ascii_case(hidden.as_bytes())
-            })
+            && self
+                .resource_hidden
+                .as_deref()
+                .is_some_and(|hidden| parts[0].as_bytes().eq_ignore_ascii_case(hidden.as_bytes()))
         {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
@@ -463,27 +481,33 @@ impl FilePolicy {
                 ffi::CString,
                 os::{
                     fd::{AsRawFd, FromRawFd},
-                    unix::{ffi::OsStrExt, fs::{OpenOptionsExt, MetadataExt}},
+                    unix::{
+                        ffi::OsStrExt,
+                        fs::{MetadataExt, OpenOptionsExt},
+                    },
                 },
             };
             // Resolve a host-authorized alias once (e.g. /sdcard or macOS
             // /var), then bind every canonical component without following
             // links. A replaced ancestor cannot redirect the subsequent open.
-            let absolute = path.canonicalize().map_err(|e|policy_error(stage,e))?;
-            let expected = std::fs::metadata(&absolute).map_err(|e|policy_error(stage+1,e))?;
+            let absolute = path.canonicalize().map_err(|e| policy_error(stage, e))?;
+            let expected = std::fs::metadata(&absolute).map_err(|e| policy_error(stage + 1, e))?;
             // Android's /data and /data/user/0 can be execute-only to an app.
             // O_RDONLY would require unrelated ancestor listing permission.
             // O_PATH retains only traversal capability; nofollow still rejects
             // a substituted symlink at every component. Only the final root is
             // reopened O_RDONLY to prove/read its actual directory contents.
-            #[cfg(any(target_os="android", target_os="linux"))]
+            #[cfg(any(target_os = "android", target_os = "linux"))]
             let ancestor_mode = libc::O_PATH;
-            #[cfg(not(any(target_os="android", target_os="linux")))]
+            #[cfg(not(any(target_os = "android", target_os = "linux")))]
             let ancestor_mode = libc::O_RDONLY;
             let mut dir = std::fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(ancestor_mode | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open("/").map_err(|e|policy_error(stage+2,e))?;
+                .custom_flags(
+                    ancestor_mode | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+                .open("/")
+                .map_err(|e| policy_error(stage + 2, e))?;
             let mut normalized = PathBuf::from("/");
             for component in absolute.components() {
                 match component {
@@ -508,23 +532,29 @@ impl FilePolicy {
                             // its full path instead; the device/inode check
                             // below still proves it is the directory that
                             // was resolved.
-                            #[cfg(any(target_os="ios", target_os="macos"))]
+                            #[cfg(any(target_os = "ios", target_os = "macos"))]
                             if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
                                 let c = CString::new(absolute.as_os_str().as_bytes())?;
                                 let fd = unsafe {
                                     libc::open(
                                         c.as_ptr(),
-                                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                                        libc::O_RDONLY
+                                            | libc::O_DIRECTORY
+                                            | libc::O_NOFOLLOW
+                                            | libc::O_CLOEXEC,
                                     )
                                 };
                                 if fd < 0 {
-                                    return Err(policy_error(stage+7, io::Error::last_os_error()));
+                                    return Err(policy_error(
+                                        stage + 7,
+                                        io::Error::last_os_error(),
+                                    ));
                                 }
                                 dir = unsafe { std::fs::File::from_raw_fd(fd) };
                                 normalized = absolute.clone();
                                 break;
                             }
-                            return Err(policy_error(stage+3, error));
+                            return Err(policy_error(stage + 3, error));
                         }
                         dir = unsafe { std::fs::File::from_raw_fd(fd) };
                         normalized.push(part);
@@ -533,17 +563,28 @@ impl FilePolicy {
                 }
             }
             let dot = CString::new(".").unwrap();
-            let fd = unsafe {libc::openat(dir.as_raw_fd(),dot.as_ptr(),libc::O_RDONLY|libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC)};
-            if fd<0 {return Err(policy_error(stage+4,io::Error::last_os_error()));}
-            let dir = unsafe {std::fs::File::from_raw_fd(fd)};
-            let bound = dir.metadata().map_err(|e|policy_error(stage+5,e))?;
-            if !bound.is_dir() || (bound.dev(),bound.ino()) != (expected.dev(),expected.ino()) {
-                return Err(policy_error(stage+6,io::Error::from(io::ErrorKind::PermissionDenied)));
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    dot.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(policy_error(stage + 4, io::Error::last_os_error()));
+            }
+            let dir = unsafe { std::fs::File::from_raw_fd(fd) };
+            let bound = dir.metadata().map_err(|e| policy_error(stage + 5, e))?;
+            if !bound.is_dir() || (bound.dev(), bound.ino()) != (expected.dev(), expected.ino()) {
+                return Err(policy_error(
+                    stage + 6,
+                    io::Error::from(io::ErrorKind::PermissionDenied),
+                ));
             }
             Ok((normalized, dir))
         }
-        let (resource, resource_dir) = open_root(resource,101)?;
-        let (user, user_dir) = open_root(user,111)?;
+        let (resource, resource_dir) = open_root(resource, 101)?;
+        let (user, user_dir) = open_root(user, 111)?;
         // A user root directly inside the resource root is allowed; that one
         // directory then no longer exists for resource reads. Deeper nesting,
         // the same directory, or the resource root inside the user root stay
@@ -551,7 +592,8 @@ impl FilePolicy {
         let resource_hidden = (user.parent() == Some(resource.as_path()))
             .then(|| user.file_name().map(|name| name.to_owned()))
             .flatten();
-        if resource_hidden.is_none() && (user.starts_with(&resource) || resource.starts_with(&user)) {
+        if resource_hidden.is_none() && (user.starts_with(&resource) || resource.starts_with(&user))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "host_policy:120:0",
@@ -605,8 +647,18 @@ impl FilePolicy {
         }
         None
     }
-    pub fn user_metadata(&self,name:&str)->Option<PolicyMetadata> {self.metadata(&user_data_alias(name))}
-    pub fn enumerate_user(&self,pattern:&str,recursive:bool,max_count:usize,directories:bool)->io::Result<Vec<String>> {self.enumerate(&user_data_alias(pattern),recursive,max_count,directories)}
+    pub fn user_metadata(&self, name: &str) -> Option<PolicyMetadata> {
+        self.metadata(&user_data_alias(name))
+    }
+    pub fn enumerate_user(
+        &self,
+        pattern: &str,
+        recursive: bool,
+        max_count: usize,
+        directories: bool,
+    ) -> io::Result<Vec<String>> {
+        self.enumerate(&user_data_alias(pattern), recursive, max_count, directories)
+    }
     pub fn read_loose(&self, name: &str) -> io::Result<Vec<u8>> {
         use std::io::Read;
         let normalized = name.replace('\\', "/");
@@ -760,12 +812,14 @@ impl FilePolicy {
     pub fn probe_writable(&self, name: &str) -> io::Result<()> {
         use std::os::fd::{AsRawFd, FromRawFd};
         let normalized = user_data_alias(name);
-        if name.replace('\\',"/").starts_with("bgi-resource/") && normalized.starts_with("bgi-user/") {
+        if name.replace('\\', "/").starts_with("bgi-resource/")
+            && normalized.starts_with("bgi-user/")
+        {
             // The original resource UserData may exist while the separate user
             // tree is empty. Materialize only this authorized user directory,
             // not the original contents, before the script's writable probe.
-            let marker=format!("{}/.probe-parent",normalized.trim_end_matches('/'));
-            let _=self.parent(&marker,true)?;
+            let marker = format!("{}/.probe-parent", normalized.trim_end_matches('/'));
+            let _ = self.parent(&marker, true)?;
         }
         if normalized.starts_with("bgi-resource/") {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
@@ -948,8 +1002,12 @@ impl FilePolicy {
     pub fn metadata(&self, _: &str) -> Option<PolicyMetadata> {
         None
     }
-    pub fn user_metadata(&self,_:&str)->Option<PolicyMetadata> {None}
-    pub fn enumerate_user(&self,_:&str,_:bool,_:usize,_:bool)->io::Result<Vec<String>> {Self::unavailable()}
+    pub fn user_metadata(&self, _: &str) -> Option<PolicyMetadata> {
+        None
+    }
+    pub fn enumerate_user(&self, _: &str, _: bool, _: usize, _: bool) -> io::Result<Vec<String>> {
+        Self::unavailable()
+    }
     pub fn read_loose(&self, _: &str) -> io::Result<Vec<u8>> {
         Self::unavailable()
     }
@@ -1044,15 +1102,31 @@ mod tests {
         assert_eq!(p.read_user("slot.dat").unwrap(), b"save");
         assert_eq!(p.read_loose("slot.dat").unwrap(), b"save");
         assert_eq!(p.read_loose("story").unwrap(), b"resource");
-        for name in ["bgi-resource/savedata/slot.dat", "bgi-resource/SaveData/slot.dat"] {
+        for name in [
+            "bgi-resource/savedata/slot.dat",
+            "bgi-resource/SaveData/slot.dat",
+        ] {
             assert!(p.read_loose(name).is_err(), "{name}");
             assert!(p.metadata(name).is_none(), "{name}");
         }
         assert!(p.read_resource("savedata/slot.dat", 1024).is_err());
-        assert_eq!(p.enumerate("bgi-resource/*", true, 0, false).unwrap(), vec!["story".to_string()]);
-        assert!(p.enumerate("bgi-resource/*", false, 0, true).unwrap().is_empty());
-        assert!(p.enumerate("bgi-resource/savedata/*", false, 0, false).is_err());
-        assert_eq!(p.enumerate("*", false, 0, false).unwrap(), vec!["slot.dat".to_string()]);
+        assert_eq!(
+            p.enumerate("bgi-resource/*", true, 0, false).unwrap(),
+            vec!["story".to_string()]
+        );
+        assert!(
+            p.enumerate("bgi-resource/*", false, 0, true)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            p.enumerate("bgi-resource/savedata/*", false, 0, false)
+                .is_err()
+        );
+        assert_eq!(
+            p.enumerate("*", false, 0, false).unwrap(),
+            vec!["slot.dat".to_string()]
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
@@ -1078,30 +1152,73 @@ mod tests {
     }
     #[test]
     fn install_userdata_alias_is_real_user_io_not_resource_write_or_original_save_import() {
-        let (base,p)=roots("userdata-alias");
+        let (base, p) = roots("userdata-alias");
         std::fs::create_dir(p.resource.join("UserData")).unwrap();
-        std::fs::write(p.resource.join("UserData/original.sud"),b"original").unwrap();
+        std::fs::write(p.resource.join("UserData/original.sud"), b"original").unwrap();
         assert!(p.read_user("bgi-resource\\UserData/original.sud").is_err());
-        assert!(p.user_metadata("bgi-resource\\UserData/original.sud").is_none());
-        assert_eq!(p.read_loose("bgi-resource\\UserData/original.sud").unwrap(),b"original");
+        assert!(
+            p.user_metadata("bgi-resource\\UserData/original.sud")
+                .is_none()
+        );
+        assert_eq!(
+            p.read_loose("bgi-resource\\UserData/original.sud").unwrap(),
+            b"original"
+        );
         p.probe_writable("bgi-resource\\userdata").unwrap();
         assert!(p.user_metadata("bgi-resource\\USERDATA").unwrap().is_dir());
         assert!(!p.user.join("UserData/original.sud").exists());
-        p.atomic_write("bgi-resource\\UserData/new.sud",b"new").unwrap();
-        assert_eq!(p.read_user("bgi-user\\userdata/NEW.sud").unwrap(),b"new");
-        assert_eq!(p.read_user("bgi-resource\\USERDATA/new.sud").unwrap(),b"new");
+        p.atomic_write("bgi-resource\\UserData/new.sud", b"new")
+            .unwrap();
+        assert_eq!(p.read_user("bgi-user\\userdata/NEW.sud").unwrap(), b"new");
+        assert_eq!(
+            p.read_user("bgi-resource\\USERDATA/new.sud").unwrap(),
+            b"new"
+        );
         assert!(p.read_loose("bgi-resource\\userdata/new.sud").is_err());
-        assert_eq!(p.user_metadata("bgi-resource\\userdata/new.sud").unwrap().len(),3);
-        p.atomic_write("bgi-resource\\UserData/original.sud",b"private replacement").unwrap();
-        assert_eq!(p.read_loose("bgi-resource\\UserData/original.sud").unwrap(),b"original");
-        assert_eq!(p.read_user("bgi-resource\\UserData/original.sud").unwrap(),b"private replacement");
+        assert_eq!(
+            p.user_metadata("bgi-resource\\userdata/new.sud")
+                .unwrap()
+                .len(),
+            3
+        );
+        p.atomic_write(
+            "bgi-resource\\UserData/original.sud",
+            b"private replacement",
+        )
+        .unwrap();
+        assert_eq!(
+            p.read_loose("bgi-resource\\UserData/original.sud").unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            p.read_user("bgi-resource\\UserData/original.sud").unwrap(),
+            b"private replacement"
+        );
         p.create_directory("bgi-resource\\userdata/Nested").unwrap();
         assert!(p.metadata("bgi-user\\UserData/nested").unwrap().is_dir());
-        assert_eq!(p.enumerate("bgi-resource\\UserData/*",false,0,false).unwrap(),vec!["original.sud"]);
-        assert_eq!(p.enumerate_user("bgi-resource\\UserData/*",false,0,false).unwrap(),vec!["new.sud","original.sud"]);
-        for denied in ["bgi-resource/story.arc","bgi-resource/UserData/../../story.arc","bgi-resource/UserData/.ethornell-session.lock","bgi-resource/UserDataX/slot"] {assert!(p.atomic_write(denied,b"bad").is_err());}
+        assert_eq!(
+            p.enumerate("bgi-resource\\UserData/*", false, 0, false)
+                .unwrap(),
+            vec!["original.sud"]
+        );
+        assert_eq!(
+            p.enumerate_user("bgi-resource\\UserData/*", false, 0, false)
+                .unwrap(),
+            vec!["new.sud", "original.sud"]
+        );
+        for denied in [
+            "bgi-resource/story.arc",
+            "bgi-resource/UserData/../../story.arc",
+            "bgi-resource/UserData/.ethornell-session.lock",
+            "bgi-resource/UserDataX/slot",
+        ] {
+            assert!(p.atomic_write(denied, b"bad").is_err());
+        }
         assert!(!p.resource.join("UserData/new.sud").exists());
-        assert_eq!(std::fs::read(p.resource.join("UserData/original.sud")).unwrap(),b"original");
+        assert_eq!(
+            std::fs::read(p.resource.join("UserData/original.sud")).unwrap(),
+            b"original"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
@@ -1230,30 +1347,41 @@ mod tests {
     }
     #[test]
     fn host_authorized_root_alias_binds_the_same_canonical_directory_inode() {
-        use std::os::unix::fs::{symlink,MetadataExt};
-        let (base,p)=roots("canonical-alias");
-        symlink(&p.resource,base.join("resource-alias")).unwrap();
-        symlink(&p.user,base.join("user-alias")).unwrap();
-        let alias=FilePolicy::new(&base.join("resource-alias"),&base.join("user-alias")).unwrap();
-        assert_eq!(alias.resource_dir.metadata().unwrap().ino(),p.resource_dir.metadata().unwrap().ino());
-        assert_eq!(alias.user_dir.metadata().unwrap().ino(),p.user_dir.metadata().unwrap().ino());
-        assert_eq!(alias.resource,p.resource);assert_eq!(alias.user,p.user);
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let (base, p) = roots("canonical-alias");
+        symlink(&p.resource, base.join("resource-alias")).unwrap();
+        symlink(&p.user, base.join("user-alias")).unwrap();
+        let alias =
+            FilePolicy::new(&base.join("resource-alias"), &base.join("user-alias")).unwrap();
+        assert_eq!(
+            alias.resource_dir.metadata().unwrap().ino(),
+            p.resource_dir.metadata().unwrap().ino()
+        );
+        assert_eq!(
+            alias.user_dir.metadata().unwrap().ino(),
+            p.user_dir.metadata().unwrap().ino()
+        );
+        assert_eq!(alias.resource, p.resource);
+        assert_eq!(alias.user, p.user);
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
-    #[cfg(any(target_os="linux",target_os="android"))]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn execute_only_ancestor_does_not_require_directory_listing_permission() {
         use std::os::unix::fs::PermissionsExt;
-        let (base,p)=roots("execute-only");
-        let nested=base.join("traverse");
+        let (base, p) = roots("execute-only");
+        let nested = base.join("traverse");
         std::fs::create_dir_all(nested.join("resource")).unwrap();
         std::fs::create_dir_all(nested.join("user")).unwrap();
-        std::fs::set_permissions(&nested,std::fs::Permissions::from_mode(0o111)).unwrap();
-        let bound=FilePolicy::new(&nested.join("resource"),&nested.join("user"));
-        std::fs::set_permissions(&nested,std::fs::Permissions::from_mode(0o700)).unwrap();
-        let bound=bound.unwrap();bound.atomic_write("slot",b"safe").unwrap();
-        assert_eq!(bound.read_user("slot").unwrap(),b"safe");
-        drop(p);drop(bound);std::fs::remove_dir_all(base).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let bound = FilePolicy::new(&nested.join("resource"), &nested.join("user"));
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bound = bound.unwrap();
+        bound.atomic_write("slot", b"safe").unwrap();
+        assert_eq!(bound.read_user("slot").unwrap(), b"safe");
+        drop(p);
+        drop(bound);
+        std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
     fn archive_family_and_explicit_root_names_use_only_authorized_descriptors() {

@@ -476,12 +476,20 @@ impl ApplicationHandler for WindowApp {
                     let monitor_rect = |monitor: &winit::monitor::MonitorHandle| {
                         let origin = monitor.position()?;
                         let size = monitor.current_video_mode()?.size();
-                        Some([origin.x, origin.y, origin.x + size.width as i32, origin.y + size.height as i32])
+                        Some([
+                            origin.x,
+                            origin.y,
+                            origin.x + size.width as i32,
+                            origin.y + size.height as i32,
+                        ])
                     };
-                    runtime.api.monitor_rects =
-                        window.available_monitors().filter_map(|monitor| monitor_rect(&monitor)).collect();
-                    runtime.api.current_monitor_rect =
-                        window.current_monitor().and_then(|monitor| monitor_rect(&monitor));
+                    runtime.api.monitor_rects = window
+                        .available_monitors()
+                        .filter_map(|monitor| monitor_rect(&monitor))
+                        .collect();
+                    runtime.api.current_monitor_rect = window
+                        .current_monitor()
+                        .and_then(|monitor| monitor_rect(&monitor));
                     if let Ok(position) = window.outer_position() {
                         runtime.api.window_outer_position = (position.x, position.y);
                     }
@@ -497,7 +505,11 @@ impl ApplicationHandler for WindowApp {
                         *frame_pacing,
                         // sub_499290 returns the frozen time inside a pause
                         // section that froze the clock.
-                        if runtime.api.engine_clock_frozen { 0 } else { elapsed_ms },
+                        if runtime.api.engine_clock_frozen {
+                            0
+                        } else {
+                            elapsed_ms
+                        },
                         audio_elapsed_ms,
                         Some(audio),
                         "window",
@@ -679,7 +691,9 @@ impl ApplicationHandler for WindowApp {
                         target.exit();
                         return;
                     }
-                    if runtime.api.quit_requested || runtime.api.native_system.restart.is_some() && runtime.vm.halted {
+                    if runtime.api.quit_requested
+                        || runtime.api.native_system.restart.is_some() && runtime.vm.halted
+                    {
                         tracing::info!("runtime quit event received");
                         runtime.api.run_scheduled_restart();
                         target.exit();
@@ -691,7 +705,10 @@ impl ApplicationHandler for WindowApp {
                 }
                 // sub_462100: without a due presentation the window shows the
                 // last composed frame again (WM_PAINT path).
-                if runtime.as_mut().is_some_and(|runtime| !runtime.api.take_present_due()) {
+                if runtime
+                    .as_mut()
+                    .is_some_and(|runtime| !runtime.api.take_present_due())
+                {
                     if let Some(runtime) = runtime.as_mut() {
                         runtime.api.performance_profile.end(false);
                     }
@@ -763,9 +780,10 @@ impl ApplicationHandler for WindowApp {
                     Ok(()) => {
                         if let Some(runtime) = runtime.as_mut() {
                             runtime.api.presentation_state = runtime
-                .api
-                .clock_base_ms
-                .wrapping_add(runtime.api.engine_time_ms as u32) as i32;
+                                .api
+                                .clock_base_ms
+                                .wrapping_add(runtime.api.engine_time_ms as u32)
+                                as i32;
                         }
                     }
                     Err(err) => {
@@ -984,5 +1002,4 @@ mod tests {
             2
         );
     }
-
 }

@@ -77,7 +77,10 @@ pub(crate) fn layout_text(
     let step = |ch: char| advance_of(ch) + params.spacing;
     let right = params.bitmap_width;
 
-    let indent = if params.kinsoku && params.indent_brackets && chars.first().is_some_and(|c| INDENT_OPENERS.contains(*c)) {
+    let indent = if params.kinsoku
+        && params.indent_brackets
+        && chars.first().is_some_and(|c| INDENT_OPENERS.contains(*c))
+    {
         step(chars[0])
     } else {
         0.0
@@ -124,7 +127,12 @@ pub(crate) fn layout_text(
                 }
             }
         }
-        let bound = right - if params.kinsoku && !hang { params.size } else { 0.0 };
+        let bound = right
+            - if params.kinsoku && !hang {
+                params.size
+            } else {
+                0.0
+            };
         if !at_line_start && x + needed > bound {
             x = line_start;
             y += pitch;
@@ -189,7 +197,10 @@ mod tests {
         let layout = layout_text("あいうえおか", &params(50.0, false), &full);
         assert_eq!(layout.lines, 2);
         // exactly full is one line
-        assert_eq!(layout_text("あいうえお", &params(50.0, false), &full).lines, 1);
+        assert_eq!(
+            layout_text("あいうえお", &params(50.0, false), &full).lines,
+            1
+        );
     }
 
     #[test]
