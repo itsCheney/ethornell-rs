@@ -7224,7 +7224,18 @@ impl RuntimeTraceApi {
         let source_image = crop_decoded_image(self.graph_images.get(&source_key)?, source_region);
         let composite_key = format!("runtime:bitmap:{destination}");
 
-        let mut destination_image = if let Some(image) = self.graph_images.get(&composite_key) {
+        // A composite left by an earlier use of this slot is stale once the
+        // slot was released or loaded with another resource; only the slot's
+        // current pixels are the blit destination.
+        let current = self
+            .graph_resources
+            .get(&destination)
+            .is_some_and(|resource| resource.key == composite_key);
+        let mut destination_image = if let Some(image) = self
+            .graph_images
+            .get(&composite_key)
+            .filter(|_| current)
+        {
             image.clone()
         } else if let Some((key, region)) = self
             .resource_image_region(destination)
@@ -16508,6 +16519,47 @@ mod input_tests {
     }
 
     #[test]
+    fn blit_into_a_reloaded_slot_starts_from_the_new_resource() {
+        // Wonderful Everyday HD loads the SAVE or LOAD title into bitmap
+        // 1318, blits the slot frames onto it and releases it; the next
+        // screen must not reuse the previous screen's composite.
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let destination = 1318;
+        let source = 1317;
+        for (key, value) in [("test:save", 10), ("test:load", 20), ("test:frame", 255)] {
+            api.store_graph_image(
+                key.into(),
+                DecodedImage {
+                    width: 2,
+                    height: 1,
+                    rgba: vec![value; 8],
+                },
+            );
+        }
+        api.graph_resources
+            .insert(source, RuntimeGraphResource::whole("test:frame".into()));
+        api.graph_resources
+            .insert(destination, RuntimeGraphResource::whole("test:save".into()));
+        api.composite_graph_bitmap(destination, source, 1, 0, 128, 0)
+            .unwrap();
+        assert_eq!(
+            api.graph_bitmap_image(destination).unwrap().rgba[..4],
+            [10; 4]
+        );
+
+        api.graph_resources.remove(&destination);
+        api.graph_resources
+            .insert(destination, RuntimeGraphResource::whole("test:load".into()));
+        api.composite_graph_bitmap(destination, source, 1, 0, 128, 0)
+            .unwrap();
+        let image = api.graph_bitmap_image(destination).unwrap();
+        assert_eq!(image.rgba[..4], [20; 4]);
+        assert_eq!(image.rgba[4..], [255; 4]);
+    }
+
+    #[test]
     fn mode128_format1_to_format2_does_not_leak_source_fourth_byte_as_alpha() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -20954,7 +21006,14 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
 
     fn disk_file_exists(&mut self, path: &str) -> bool {
         if let Some(policy) = file_policy::active() {
-            return policy.metadata(path).is_some_and(|meta| !meta.is_dir());
+            // Sys80:34 is how Wonderful Everyday HD finds its saves before
+            // reading them back, so it must see the aliased user copy.
+            let meta = if file_policy::is_user_alias(path) {
+                policy.user_metadata(path)
+            } else {
+                policy.metadata(path)
+            };
+            return meta.is_some_and(|meta| !meta.is_dir());
         }
         find_runtime_file_from_root(&self.manager, &self.native_root, "", path)
             .is_some_and(|host| host.is_file())

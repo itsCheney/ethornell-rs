@@ -114,6 +114,18 @@ impl Vm {
         self.secondary_resource_root.clone().unwrap_or_default()
     }
 
+    /// Whether `path` names a location sub_4650E0 accepts: an absolute path,
+    /// or one below the host's own primary root, which a sandboxed host may
+    /// give as a virtual (relative) root.
+    fn is_rooted_resource_path<A: SysApi>(&self, api: &mut A, path: &str) -> bool {
+        is_absolute_resource_path(path)
+            || std::path::Path::new(path).is_absolute()
+            || api
+                .primary_resource_root()
+                .map(|root| ensure_trailing_separator(&root))
+                .is_some_and(|root| !root.is_empty() && path.starts_with(&root))
+    }
+
     /// sub_465AE0 + sub_465880 for one resolved path. A relative path (an
     /// empty media root) fails sub_4650E0 and counts as missing.
     fn read_resource_path<A: SysApi>(
@@ -123,7 +135,7 @@ impl Vm {
         offset: u32,
         length: u32,
     ) -> Result<Vec<u8>, i32> {
-        if !is_absolute_resource_path(path) && !std::path::Path::new(path).is_absolute() {
+        if !self.is_rooted_resource_path(api, path) {
             return Err(RESOURCE_MISSING);
         }
         let bytes = api.read_disk_file(path).ok_or(RESOURCE_MISSING)?;
@@ -166,7 +178,7 @@ impl Vm {
     /// sub_4669A0: root + name, then the search directories, exists as a
     /// non-directory.
     fn loose_resource_exists<A: SysApi>(&self, api: &mut A, root: &str, file: &str) -> bool {
-        if !is_absolute_resource_path(root) && !std::path::Path::new(root).is_absolute() {
+        if !self.is_rooted_resource_path(api, root) {
             return false;
         }
         if api.disk_file_exists(&format!("{root}{file}")) {
@@ -614,5 +626,42 @@ mod tests {
         api.retries = vec![false, true, true];
         assert_eq!(vm.launch_native_process(&mut api, dir, "u.exe", Some("e".into()), false, true, false), 0);
         assert_eq!(api.attempts.len(), 3);
+    }
+
+    struct SandboxApi;
+
+    impl SysApi for SandboxApi {
+        fn call_sys(&mut self, _call: &mut NativeCallFrame) -> VmResult<Value> {
+            Ok(Value::None)
+        }
+        fn primary_resource_root(&mut self) -> Option<String> {
+            Some("bgi-resource\\".into())
+        }
+        fn disk_file_exists(&mut self, path: &str) -> bool {
+            path == "bgi-resource\\UserData\\a.sud"
+        }
+        fn read_disk_file(&mut self, path: &str) -> Option<Vec<u8>> {
+            self.disk_file_exists(path).then(|| b"save".to_vec())
+        }
+    }
+
+    #[test]
+    fn loose_files_resolve_below_a_virtual_host_root() {
+        // A sandboxed host roots the game at a relative virtual path; saves
+        // found and read below it must not count as missing.
+        let mut vm = Vm::new();
+        let mut api = SandboxApi;
+        vm.stack
+            .extend([Value::Int(0), Value::Str("UserData\\a.sud".into())]);
+        assert_eq!(vm.sys80_34_file_exists(&mut api).unwrap(), Value::Int(1));
+        assert_eq!(
+            vm.read_loose_resource(&mut api, "bgi-resource\\", "UserData\\a.sud", 0, 0),
+            Ok(b"save".to_vec())
+        );
+        // Other relative roots still fail as in sub_4650E0.
+        assert_eq!(
+            vm.read_loose_resource(&mut api, "elsewhere\\", "UserData\\a.sud", 0, 0),
+            Err(RESOURCE_MISSING)
+        );
     }
 }

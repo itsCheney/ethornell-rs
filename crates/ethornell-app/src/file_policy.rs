@@ -1261,6 +1261,12 @@ mod tests {
         assert!(is_user_alias("bgi-resource\\BGI.gdb"));
         assert!(!is_user_alias("bgi-resource\\data01000.arc"));
         assert!(!is_user_alias("bgi-user\\BGI.gdb"));
+        // Existence checks of an aliased save must look in the user root.
+        let save = "bgi-resource\\UserData\\SubarashikihibiHD102.sud";
+        assert!(p.metadata(save).is_none());
+        p.atomic_write(save, b"quick save").unwrap();
+        assert!(p.metadata(save).is_none());
+        assert!(p.user_metadata(save).is_some_and(|meta| !meta.is_dir()));
         for denied in [
             "bgi-resource/BGI.exe",
             "bgi-resource/BGI01.cad",
