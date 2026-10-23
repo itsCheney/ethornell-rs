@@ -120,6 +120,12 @@ pub(crate) fn user_data_alias(name: &str) -> String {
     normalized
 }
 
+/// A resource-root name that `user_data_alias` redirects to the user root.
+pub(crate) fn is_user_alias(name: &str) -> bool {
+    let normalized = name.replace('\\', "/");
+    normalized.starts_with("bgi-resource/") && user_data_alias(&normalized).starts_with("bgi-user/")
+}
+
 fn is_root_save_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower == "bgi.gdb"
@@ -1249,6 +1255,12 @@ mod tests {
             std::fs::read(p.resource.join("BGI.gdb")).unwrap(),
             b"windows save"
         );
+        assert!(is_user_alias(
+            "bgi-resource\\UserData\\SubarashikihibiHD001.sud"
+        ));
+        assert!(is_user_alias("bgi-resource\\BGI.gdb"));
+        assert!(!is_user_alias("bgi-resource\\data01000.arc"));
+        assert!(!is_user_alias("bgi-user\\BGI.gdb"));
         for denied in [
             "bgi-resource/BGI.exe",
             "bgi-resource/BGI01.cad",

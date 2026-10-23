@@ -20939,6 +20939,13 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
 
     fn read_disk_file(&mut self, path: &str) -> Option<Vec<u8>> {
         if let Some(policy) = file_policy::active() {
+            // Saves written through the UserData / root save-file aliases
+            // live in the user root; Wonderful Everyday HD reads them back
+            // with Sys80:31 like any loose file, and its existence checks
+            // already see the user copy.
+            if file_policy::is_user_alias(path) {
+                return policy.read_user(path).ok();
+            }
             return policy.read_loose(path).ok();
         }
         let host = find_runtime_file_from_root(&self.manager, &self.native_root, "", path)?;
