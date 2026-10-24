@@ -869,7 +869,15 @@ pub fn disassemble_bp(buf: &[u8]) -> Vec<BpInstruction> {
 pub fn parse_bp_program(script_name: Option<String>, buf: &[u8]) -> BpProgram {
     let range = detect_code_range(buf);
     let module_size = declared_module_size(buf);
-    let code = Arc::new(buf[range.start..range.end].to_vec());
+    // The engine loads the whole module (sub_465AB0): string literals sit
+    // after the last instruction and are read through code pointers, so they
+    // must be installed with it. Only the instructions stop at the code end.
+    let module_end = if module_size != 0 {
+        range.start + module_size as usize
+    } else {
+        range.end
+    };
+    let code = Arc::new(buf[range.start..module_end].to_vec());
     let mut cursor = Cursor::new(code.as_slice());
     let mut instructions = Vec::new();
     let mut labels = HashMap::new();
@@ -1162,6 +1170,17 @@ mod tests {
         assert_eq!(&*instruction.raw, &[0x02, 1, 2, 3, 4]);
         // Equality describes instruction bytes, regardless of their backing image.
         assert_eq!(instruction.raw, vec![0x02, 1, 2, 3, 4].into());
+    }
+
+    #[test]
+    fn module_code_keeps_the_string_table_after_the_last_instruction() {
+        // push_string to "色" (Shift-JIS 90 46) after the final ret: the
+        // engine reads it through the code pointer, in the game's code page.
+        let mut bytes = vec![8, 0, 0, 0, 7, 0, 0, 0];
+        bytes.extend_from_slice(&[0x05, 4, 0, 0x17, 0x90, 0x46, 0]);
+        let program = parse_bp_program(None, &bytes);
+        assert_eq!(program.instructions.len(), 2);
+        assert_eq!(program.code.as_slice(), &bytes[8..]);
     }
 
     #[test]
