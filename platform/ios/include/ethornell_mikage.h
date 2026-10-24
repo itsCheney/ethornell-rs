@@ -15,14 +15,6 @@ void ethornell_mikage_set_log_callback(EthornellMikageLogCallback callback, cons
 /* The game's own screen size in its pixels (1280x720 until the game sets one).
  * Returns 0, or a negative ABI status. */
 int32_t ethornell_mikage_screen_size(uint64_t handle, uint32_t *width, uint32_t *height);
-/* Save (1), load (2), quick save (3) and quick load (4) the game's own icon
- * bar has enabled now, as bits 1 << (command - 1); 0 for a game without a
- * known icon bar. Returns 0, or a negative ABI status. */
-int32_t ethornell_mikage_game_commands(uint64_t handle, uint32_t *commands);
-/* Clicks the icon of an enabled command, so the game runs its own screen or
- * confirmation. Returns 1 when clicked, 0 when not enabled, or a negative ABI
- * status. */
-int32_t ethornell_mikage_run_game_command(uint64_t handle, uint32_t command);
 /* The launcher executable for the next ethornell_ios_create on this thread: a
  * file name in the resource root such as "BGI-CHS.exe". The files a patch
  * packed into it with Enigma Virtual Box win over the game's archives, as

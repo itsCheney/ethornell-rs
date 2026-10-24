@@ -223,10 +223,6 @@ pub struct HostRuntime {
     closed: bool,
     audio_suspended: bool,
     vm_budget: ethornell_vm::VmResourceBudget,
-    /// The game's own icon bar, once looked for (`game_commands`).
-    icon_bar: Option<Option<crate::icon_bar::IconBar>>,
-    /// A host-clicked icon: frames left until its button is released.
-    icon_release: Option<(u32, f32, f32)>,
 }
 impl HostRuntime {
     pub fn create(config: HostConfig) -> Result<Self> {
@@ -361,8 +357,6 @@ impl HostRuntime {
             engine_frames: 0,
             closed: false,
             audio_suspended: false,
-            icon_bar: None,
-            icon_release: None,
             vm_budget: host_vm_budget(host_physical_memory()),
         })
     }
@@ -785,14 +779,6 @@ impl HostRuntime {
             .vm
             .check_resource_budget(self.vm_budget)
             .map_err(|e| EthornellError::Other(e.to_string()))?;
-        if let Some((frames, x, y)) = self.icon_release.take() {
-            if frames == 0 {
-                self.input_queue
-                    .push_back(RuntimeInputEvent::MouseRelease { x, y });
-            } else {
-                self.icon_release = Some((frames - 1, x, y));
-            }
-        }
         let audio_required = self.audio.is_some();
         let report = runtime_frontend::drive_runtime_frame_checked(
             &mut self.runtime,
@@ -898,39 +884,6 @@ impl HostRuntime {
         self.last_tick = None;
         self.tick_remainder_ns = 0;
         self.sync_audio()
-    }
-    /// Save, load, quick save and quick load the game's own icon bar has
-    /// enabled now, as bits `1 << (command - 1)` (`icon_bar` command ids);
-    /// 0 for a game without a known icon bar.
-    pub fn game_commands(&mut self) -> u32 {
-        if self.closed || self.paused != 0 || !self.runtime.api.host.pending.is_empty() {
-            return 0;
-        }
-        let manager = &self.runtime.api.manager;
-        let bar = *self
-            .icon_bar
-            .get_or_insert_with(|| crate::icon_bar::IconBar::detect(manager));
-        bar.map_or(0, |bar| bar.enabled(&self.runtime.vm.memory))
-    }
-    /// Clicks the icon of an enabled command, as the player would: the game
-    /// runs its own screen or confirmation. False when it is not enabled.
-    pub fn run_game_command(&mut self, command: u32) -> bool {
-        if !(1..=4).contains(&command)
-            || self.icon_release.is_some()
-            || self.game_commands() & (1 << (command - 1)) == 0
-        {
-            return false;
-        }
-        let Some((x, y)) = self.icon_bar.flatten().and_then(|bar| bar.icon(command)) else {
-            return false;
-        };
-        self.input_queue
-            .push_back(RuntimeInputEvent::MouseMove { x, y });
-        self.input_queue
-            .push_back(RuntimeInputEvent::MousePress { x, y });
-        // The game polls the button: hold it for a few frames.
-        self.icon_release = Some((5, x, y));
-        true
     }
     /// The game's own screen size, which the renderer letterboxes.
     pub fn screen_size(&self) -> (i32, i32) {

@@ -182,38 +182,6 @@ pub unsafe extern "C" fn ethornell_mikage_screen_size(
     status
 }
 
-/// Save (1), load (2), quick save (3) and quick load (4) the game's own icon
-/// bar has enabled now, as bits `1 << (command - 1)`; 0 for a game without a
-/// known icon bar. Status as for the ABI calls.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ethornell_mikage_game_commands(handle: u64, commands: *mut u32) -> i32 {
-    if commands.is_null() {
-        return super::fail(super::ARG, "null output");
-    }
-    let mut bits = 0;
-    let status = super::with_session(handle, true, |runtime| {
-        bits = runtime.game_commands();
-        Ok(())
-    });
-    if status == 0 {
-        unsafe { *commands = bits };
-    }
-    status
-}
-
-/// Clicks the icon of an enabled command (ids as above), so the game runs
-/// its own screen or confirmation. 1 when clicked, 0 when not enabled, or a
-/// negative ABI status.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ethornell_mikage_run_game_command(handle: u64, command: u32) -> i32 {
-    let mut ran = false;
-    let status = super::with_session(handle, false, |runtime| {
-        ran = runtime.run_game_command(command);
-        Ok(())
-    });
-    if status == 0 { i32::from(ran) } else { status }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

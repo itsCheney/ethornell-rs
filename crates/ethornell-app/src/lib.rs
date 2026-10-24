@@ -44,7 +44,6 @@ mod graph_sprite_targets;
 mod headless;
 mod host_dialog;
 mod host_installer;
-mod icon_bar;
 pub mod host_runtime;
 mod input_state;
 mod native_background;
