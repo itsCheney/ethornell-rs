@@ -11743,7 +11743,10 @@ impl Vm {
                 Value::Ptr(ptr) if ptr != 0 => {
                     let direct = self.value_as_string_with_encoding(original.clone(), encoding)?;
                     let trimmed = direct.trim_matches('\0').trim_end_matches('\u{fffd}');
-                    if trimmed.is_empty() || is_plausible_text_payload(trimmed) {
+                    // A literal in the code region is the script's own text:
+                    // scrmsg's lone "\x0c" is a page feed, not damage.
+                    let literal = text_slot && ptr & !ADDRESS_MASK == CODE_SEGMENT;
+                    if trimmed.is_empty() || literal || is_plausible_text_payload(trimmed) {
                         trimmed.to_string()
                     } else {
                         self.value_as_text_descriptor_string(original.clone(), encoding)?
@@ -16661,6 +16664,26 @@ mod tests {
             vm.stack[auxiliary_index],
             Value::Str("auxiliary text".into())
         );
+    }
+
+    #[test]
+    fn a_page_feed_literal_reaches_the_message_window_as_itself() {
+        // scrmsg starts each page with GraphStartWindowMessage(window, "\x0c").
+        let mut vm = Vm::new();
+        let literal = crate::CODE_SEGMENT | 0x1000;
+        let at = vm.memory_addr(literal) as usize;
+        vm.memory[at..at + 2].copy_from_slice(b"\x0c\0");
+        // The next literals read as a pointer to unrelated text.
+        let elsewhere = 0x0800_3000u32;
+        vm.write_c_string(elsewhere, "junk").unwrap();
+        vm.memory[at + 4..at + 8].copy_from_slice(&elsewhere.to_le_bytes());
+        vm.stack.extend((0..6).map(Value::Int));
+        let index = vm.stack.len() - 1 - 4;
+        vm.stack[index] = Value::Ptr(literal);
+
+        vm.normalize_graph_string_args(0x90, 0x90).unwrap();
+
+        assert_eq!(vm.stack[index], Value::Str("\x0c".into()));
     }
 
     #[test]
