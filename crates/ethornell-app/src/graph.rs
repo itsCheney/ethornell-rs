@@ -433,7 +433,7 @@ impl RuntimeSurface {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RuntimeGraphDrawItem {
     pub(crate) owner_object: Option<i32>,
     pub(crate) key: String,
@@ -498,7 +498,7 @@ pub(crate) fn native_draw_order(item: &RuntimeGraphDrawItem) -> (i32, u64, i32) 
     (item.z, order, hit)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RuntimeClipRect {
     pub(crate) x: f32,
     pub(crate) y: f32,

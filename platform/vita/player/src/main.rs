@@ -7,6 +7,12 @@ fn main() {
 #[used]
 #[unsafe(export_name = "_newlib_heap_size_user")]
 pub static HEAP_SIZE: u32 = 320 * 1024 * 1024;
+// newlib can have tens of MiB free in separate holes yet fail to provide a
+// single 720p RGBA buffer. Use the separate CDRAM pool as a last resort for
+// allocations that the primary heap cannot satisfy. The header records the owner, so Vec/Arc keep their
+// normal ownership and every block is freed through its original allocator.
+#[cfg(target_os = "vita")]
+mod memory;
 #[cfg(target_os = "vita")]
 mod vita {
     use ethornell_console::*;
@@ -190,7 +196,13 @@ mod vita {
         let mut quit = false;
         let mut request = 0u64;
         let mut frame = 0u64;
+        let mut perf_start = Instant::now();
         while !quit {
+            if frame > 0 && frame % 300 == 0 {
+                let seconds = perf_start.elapsed().as_secs_f64();
+                log(&format!("performance: host_loops=300 elapsed_s={seconds:.3} loop_hz={:.2}", 300.0 / seconds));
+                perf_start = Instant::now();
+            }
             if frame < 120 || frame % 300 == 0 {
                 let mut status = [0i8; 2048];
                 unsafe {
@@ -294,6 +306,8 @@ mod vita {
                 start.elapsed().as_nanos().min(u64::MAX as u128) as u64,
             ) != 0
             {
+                log(&format!("engine step failed at frame={frame}"));
+                memory_status("step failure");
                 failure();
                 break;
             }
@@ -325,7 +339,10 @@ mod vita {
                         log(&format!("confirm (Cross=yes/Circle=no): {text}"));
                         request = id;
                     }
-                    3 => quit = true,
+                    3 => {
+                        log("engine requested exit");
+                        quit = true;
+                    }
                     5 => {
                         log(&format!(
                             "structured dialog unsupported by Vita shell: {text}"
@@ -337,9 +354,20 @@ mod vita {
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        let mut status = [0i8; 2048];
+        unsafe {
+            ethornell_console_diagnostics(engine, status.as_mut_ptr(), status.len());
+        }
+        log(&format!("final frame={frame} {}", unsafe {
+            std::ffi::CStr::from_ptr(status.as_ptr())
+        }.to_string_lossy()));
+        memory_status("before shutdown");
+        log("stopping audio");
         drop(audio);
+        log("destroying engine");
         unsafe {
             ethornell_console_destroy(engine);
+            log("destroying GXM");
             ethornell_vita_gpu_exit();
         }
         log("stopped");

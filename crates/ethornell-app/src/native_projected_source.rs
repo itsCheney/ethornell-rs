@@ -6,7 +6,7 @@ pub(crate) struct ProjectionMipCache {
     bindings: Vec<(i32, u64, Vec<DecodedImage>)>,
 }
 pub(super) struct ProjectedSource {
-    pub image: DecodedImage,
+    pub image: Option<DecodedImage>,
     pub level: u32,
     pub anchor_shift: i32,
     pub deformed: bool,
@@ -150,6 +150,7 @@ impl RuntimeTraceApi {
         secondary: i32,
         transition: i32,
         scale: u32,
+        allow_geometry_only: bool,
     ) -> Option<ProjectedSource> {
         if !self.projected_bindings_current(object) {
             return None;
@@ -162,6 +163,30 @@ impl RuntimeTraceApi {
             .into_iter()
             .filter(|id| *id != -1)
             .collect::<Vec<_>>();
+        let (packed, amplitude) = self
+            .graph_object_properties.get(&object)
+            .and_then(|properties| properties.properties.get(&0x60))
+            .copied().unwrap_or((0, 0));
+        let needs_deformation = (packed as u32 >> 16) != 0 && amplitude != 0;
+        // Preserve the native eager mip snapshot, but ordinary later moves
+        // at level 0 only change GPU geometry. Their cropped source pixels
+        // would be discarded by the caller, so do not allocate/copy them.
+        if allow_geometry_only && selected_level(scale) == 0 && !needs_deformation
+            && let Some(cache) = self.native_projection_mips.get(&object)
+            && cache.bindings.iter().map(|binding| binding.0).eq(ids.iter().copied())
+        {
+            let (_, primary_rect) = self.resource_image_region(primary)?;
+            if secondary != -1 {
+                let (_, secondary_rect) = self.resource_image_region(secondary)?;
+                if self.bitmap_formats.get(&secondary).copied().unwrap_or(2) != format
+                    || (primary_rect.width, primary_rect.height)
+                        != (secondary_rect.width, secondary_rect.height)
+                {
+                    return None;
+                }
+            }
+            return Some(ProjectedSource { image: None, level: 0, anchor_shift: 0, deformed: false });
+        }
         let images = ids
             .iter()
             .map(|id| self.graph_bitmap_image(*id))
@@ -203,16 +228,21 @@ impl RuntimeTraceApi {
             return None;
         }
         let level = selected_level(scale).min(cache.bindings[0].2.len() as u32);
-        let at_level = |i: usize| {
-            if level == 0 {
-                images[i].clone()
+        // Each source is consumed once. Reuse its cropped pixels at level 0;
+        // cloning here temporarily doubled large sprite buffers on every move.
+        let mut images = images.into_iter();
+        let mut at_level = |i: usize| {
+            let image = images.next()?;
+            Some(if level == 0 {
+                image
             } else {
                 cache.bindings[i].2[(level - 1) as usize].clone()
-            }
+            })
         };
-        let mut image = at_level(0);
+        let mut image = at_level(0)?;
         if secondary != -1 {
-            image = crate::bitmap_blend::crossfade_cache(&image, &at_level(1), format, transition)?;
+            image =
+                crate::bitmap_blend::crossfade_cache(&image, &at_level(1)?, format, transition)?;
         }
         if format == 1 {
             for p in image.rgba.as_chunks_mut::<4>().0 {
@@ -240,7 +270,7 @@ impl RuntimeTraceApi {
                 (image.width.wrapping_sub(original_width).wrapping_shl(15) & 0xffff0000) as i32;
         }
         Some(ProjectedSource {
-            image,
+            image: Some(image),
             level,
             anchor_shift,
             deformed,
@@ -294,5 +324,40 @@ impl RuntimeTraceApi {
             }
         }
         self.native_projection_mips.insert(object, cache);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_only_moves_skip_pixels_but_keep_eager_mips_and_mode6_source() {
+        let manager = ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = RuntimeTraceApi::new(manager);
+        let red = DecodedImage { width: 8, height: 8, rgba: [100, 0, 0, 255].repeat(64) };
+        let blue = DecodedImage { width: 8, height: 8, rgba: [0, 0, 100, 255].repeat(64) };
+        api.store_runtime_bitmap(10, red.clone(), 2);
+        let initial = api.prepare_projected_source(20, 10, -1, 0, 65536, true).unwrap();
+        assert_eq!(initial.image.unwrap(), red);
+        assert!(!api.native_projection_mips[&20].bindings[0].2.is_empty());
+        let key = api.graph_resources[&10].key.clone();
+        api.store_graph_image(key, blue.clone());
+        let moved = api.prepare_projected_source(20, 10, -1, 0, 65536, true).unwrap();
+        assert!(moved.image.is_none());
+        assert_eq!(moved.level, 0);
+        // Mode 6 always needs CPU pixels, even with an existing level-0 cache.
+        let perspective = api.prepare_projected_source(20, 10, -1, 0, 65536, false).unwrap();
+        assert_eq!(perspective.image.unwrap(), blue);
+        // Native mip snapshots retain the original pixels until explicit 5F.
+        let reduced = api.prepare_projected_source(20, 10, -1, 0, 32768, true).unwrap();
+        assert_eq!(reduced.level, 1);
+        assert_eq!(reduced.image.unwrap().rgba, [100, 0, 0, 255].repeat(16));
+        api.invalidate_projected_mips(20, [0, 0, 8, 8]);
+        let refreshed = api.prepare_projected_source(20, 10, -1, 0, 32768, true).unwrap();
+        assert_eq!(refreshed.image.unwrap().rgba, [0, 0, 100, 255].repeat(16));
+        // Reused bitmap handles still invalidate the original binding.
+        api.store_runtime_bitmap(10, red, 2);
+        assert!(api.prepare_projected_source(20, 10, -1, 0, 65536, true).is_none());
     }
 }

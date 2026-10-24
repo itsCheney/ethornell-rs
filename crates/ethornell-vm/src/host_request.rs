@@ -59,16 +59,14 @@ mod tests {
     fn program(code: u8, name: &'static str, id: u8) -> BpProgram {
         BpProgram {
             script_name: Some(format!("test-{name}")),
-            functions: vec![],
-            strings: vec![],
+            functions: std::sync::Arc::new(vec![]),
+            strings: std::sync::Arc::new(vec![]),
             instructions: std::sync::Arc::new(vec![BpInstruction {
                 offset: 8,
                 opcode: BpOpcode::Known { code, name },
-                opcode_hex: format!("{code:02x}"),
-                opcode_name: name.into(),
-                operands: vec![],
+                operands: vec![].into(),
                 known_call: None,
-                raw: vec![code, id],
+                raw: vec![code, id].into(),
                 warning: None,
             }]),
             labels: Default::default(),
@@ -370,6 +368,7 @@ mod tests {
         let mut child = root.async_tasks.remove(0);
         let mut grandchild = child.vm.async_tasks.remove(0);
         for vm in [&mut root, child.vm.as_mut(), grandchild.vm.as_mut()] {
+            materialize_test_memory(vm);
             assert_eq!(vm.graph_text_encoding, Some(encoding_rs::GBK));
             for (group, id, count, from_top) in [
                 (0x92, 0x90, 15, 13),
@@ -441,8 +440,8 @@ mod tests {
         .unwrap();
         let usage = root.resource_usage();
         assert_eq!(usage.vm_count, 2);
-        // A new thread owns only its local region until it runs.
-        assert_eq!(usage.memory_bytes, initial.memory_bytes + crate::HEAP_MEMORY_BASE);
+        // An idle thread keeps compact code, not a second process buffer.
+        assert_eq!(usage.memory_bytes, initial.memory_bytes);
         assert!(
             root.check_resource_budget(VmResourceBudget {
                 max_vm_count: 1,
@@ -535,12 +534,24 @@ mod tests {
         assert!(report.recent_trace.is_empty());
     }
 
+    // These snapshot fixtures inspect idle VMs directly, without scheduling
+    // them. Materialize their private test backing before installing bytes.
+    fn materialize_test_memory(vm: &mut Vm) {
+        if vm.memory.is_empty() {
+            vm.memory.resize(crate::HEAP_MEMORY_BASE, 0);
+            if let Some(window) = vm.parked_local.take() {
+                window.restore(&mut vm.memory[crate::LOCAL_MEMORY_BASE as usize..crate::HEAP_MEMORY_BASE]);
+            }
+        }
+    }
+
     fn write_encoded(
         vm: &mut Vm,
         pointer: u32,
         text: &str,
         encoding: &'static encoding_rs::Encoding,
     ) {
+        materialize_test_memory(vm);
         let (bytes, _, errors) = encoding.encode(text);
         assert!(!errors);
         let start = vm.memory_addr(pointer) as usize;

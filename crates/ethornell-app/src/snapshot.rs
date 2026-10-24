@@ -1893,6 +1893,40 @@ fn composite_nearest_with_format(
         return;
     }
 
+    // The common screen/background copy has no scaling or fractional source
+    // coordinates. Walk contiguous rows instead of dividing/clamping UVs and
+    // evaluating the full floating-point blend pipeline for every pixel.
+    if alpha_scale == 1.0 && blend_mode == 128
+        && width == src_width && height == src_height
+        && [x, y, src_x, src_y, width, height].iter()
+            .all(|value| value.abs() <= 32768.0 && value.fract() == 0.0)
+    {
+        let left = src_x as i64 + i64::from(x0) - x as i64;
+        let top = src_y as i64 + i64::from(y0) - y as i64;
+        let rows = (y1 - y0) as usize;
+        let columns = (x1 - x0) as usize;
+        if left >= 0 && top >= 0 && left + columns as i64 <= i64::from(src.width)
+            && top + rows as i64 <= i64::from(src.height)
+        {
+            for row in 0..rows {
+                let source_start = ((top as usize + row) * src.width as usize + left as usize) * 4;
+                let destination_start = ((y0 as usize + row) * dst.width as usize + x0 as usize) * 4;
+                let source = &src.rgba[source_start..source_start + columns * 4];
+                let destination = &mut dst.rgba[destination_start..destination_start + columns * 4];
+                for (pixel, sample) in destination.as_chunks_mut::<4>().0.iter_mut()
+                    .zip(source.as_chunks::<4>().0)
+                {
+                    if ignore_source_alpha || sample[3] == 255 {
+                        *pixel = *sample;
+                        pixel[3] = 255;
+                    } else if sample[3] != 0 {
+                        composite_native_rgba(pixel, *sample, 1.0, blend_mode);
+                    }
+                }
+            }
+            return;
+        }
+    }
     for dy in y0..y1 {
         let v = ((dy as f32 + 0.5 - y) / height).clamp(0.0, 0.999_999);
         let sy = (src_y + v * src_height).clamp(0.0, src.height.saturating_sub(1) as f32) as u32;
@@ -2077,6 +2111,38 @@ mod native_compositor_tests {
             width: 1,
             height: 1,
             rgba: vec![r, g, b, a],
+        }
+    }
+
+    #[test]
+    fn integer_copy_matches_pixel_reference_with_crop_clip_and_source_alpha() {
+        let source = DecodedImage {
+            width: 7, height: 5,
+            rgba: (0..35).flat_map(|index| [index * 7, 100, 30, [0, 1, 64, 128, 254, 255][index as usize % 6]]).collect(),
+        };
+        for ignore_alpha in [false, true] {
+            for (x, y) in [(-1, -1), (0, 0), (1, 2)] {
+                for clip in [None, Some(RuntimeClipRect { x: 2.0, y: 1.0, width: 3.0, height: 4.0 })] {
+                    let mut actual = DecodedImage { width: 9, height: 7, rgba: [40, 70, 90, 64].repeat(63) };
+                    let mut expected = actual.clone();
+                    super::composite_nearest_with_format(&mut actual, &source,
+                        x as f32, y as f32, 5.0, 3.0, 1.0, 1.0, 5.0, 3.0,
+                        1.0, 128, clip, ignore_alpha);
+                    for dy in 0..7i32 {
+                        for dx in 0..9i32 {
+                            if dx < x || dx >= x + 5 || dy < y || dy >= y + 3
+                                || !super::point_in_clip(dx, dy, clip) { continue; }
+                            let offset = (((dy - y + 1) * 7 + dx - x + 1) * 4) as usize;
+                            let mut pixel: [u8; 4] = source.rgba[offset..offset + 4].try_into().unwrap();
+                            if ignore_alpha { pixel[3] = 255; }
+                            let target = ((dy * 9 + dx) * 4) as usize;
+                            ethornell_core::composite_native_rgba(
+                                (&mut expected.rgba[target..target + 4]).try_into().unwrap(), pixel, 1.0, 128);
+                        }
+                    }
+                    assert_eq!(actual, expected, "offset=({x},{y}) clip={clip:?} ignore_alpha={ignore_alpha}");
+                }
+            }
         }
     }
 

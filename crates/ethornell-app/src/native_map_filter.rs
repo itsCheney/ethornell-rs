@@ -15,13 +15,21 @@ pub(crate) struct NativeMap {
     cache: Option<DecodedImage>,
     dirty: bool,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeFilter {
     mode: i32,
     color: i32,
     shift: i32,
     mask: Option<(i32, u64)>,
 }
+#[derive(PartialEq)]
+pub(crate) struct FilterCacheSignature {
+    size: (u32, u32),
+    items: Vec<RuntimeGraphDrawItem>,
+    revisions: Vec<(String, u64)>,
+    filters: Vec<(i32, NativeFilter, i32, Option<(String, u64, Option<RuntimeClipRect>)>)>,
+}
+
 pub(super) fn blank(w: u32, h: u32) -> DecodedImage {
     DecodedImage {
         width: w,
@@ -399,12 +407,52 @@ impl RuntimeTraceApi {
         {
             return;
         }
+        let mut items = self.graph_output_draw_items();
+        // Only the prefix up to the last visible destination-reading effect
+        // contributes to any result. Registered but hidden filters need no
+        // CPU frame, and ordinary sprites after the last filter are GPU work.
+        let Some(last_effect) = items.iter().rposition(|item| {
+            item.owner_object.is_some_and(|object| {
+                self.native_filters.contains_key(&object)
+                    || self.native_effector_rasters.contains_key(&object)
+            }) || item.key.starts_with("runtime:landscape:")
+        }) else { return; };
+        items.truncate(last_effect + 1);
         let (w, h) = snapshot::runtime_frame_size(self);
+        // Feedback effectors and landscapes must keep ticking even with
+        // unchanged inputs. Cache only ordinary filters, whose output is a
+        // pure function of this display prefix and its resource revisions.
+        let cacheable = items.iter().all(|item| {
+            !item.key.starts_with("runtime:landscape:")
+                && !item.owner_object.is_some_and(|o| self.native_effector_rasters.contains_key(&o))
+        });
+        let mut signature = cacheable.then(|| {
+            let mut revisions = items.iter().map(|item| {
+                (item.key.clone(), self.graph_image_revision(&item.key))
+            }).collect::<Vec<_>>();
+            let filters = items.iter().filter_map(|item| {
+                let object = item.owner_object?;
+                let state = self.native_filters.get(&object)?.clone();
+                let parameter = self.graph_object_properties.get(&object)
+                    .map_or(0, |p| p.transparency_parameter());
+                let mask = state.mask.and_then(|(bitmap, _)| self.graph_resources.get(&bitmap))
+                    .map(|resource| (resource.key.clone(), resource.generation, resource.source_rect));
+                if let Some((key, _, _)) = &mask {
+                    revisions.push((key.clone(), self.graph_image_revision(key)));
+                }
+                Some((object, state, parameter, mask))
+            }).collect();
+            FilterCacheSignature { size: (w, h), items: items.clone(), revisions, filters }
+        });
+        if signature.is_some() && self.native_filter_cache == signature {
+            return;
+        }
+        self.native_filter_cache = None;
         let mut frame = blank(w, h);
         for px in frame.rgba.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
-        for item in self.graph_output_draw_items() {
+        for item in items {
             if let Some(object) = item
                 .owner_object
                 .filter(|o| self.native_filters.contains_key(o))
@@ -449,15 +497,15 @@ impl RuntimeTraceApi {
                         );
                     }
                 }
-                self.store_graph_image(item.key.clone(), image.clone());
                 snapshot::composite_runtime_item(&mut frame, &image, &item);
+                self.store_graph_image(item.key.clone(), image);
             } else if let Some(object) = item
                 .owner_object
                 .filter(|o| self.native_effector_rasters.contains_key(o))
             {
                 if let Some(image) = self.render_native_effector(object, &frame) {
-                    self.store_graph_image(item.key.clone(), image.clone());
                     snapshot::composite_runtime_item(&mut frame, &image, &item);
+                    self.store_graph_image(item.key.clone(), image);
                 }
             } else if item.key.starts_with("runtime:landscape:") {
                 if let (Some(object), Some(depth)) = (
@@ -468,14 +516,22 @@ impl RuntimeTraceApi {
                         .and_then(|s| s.parse::<u32>().ok()),
                 ) {
                     if let Some(image) = self.render_native_landscape_stage(object, depth, &frame) {
-                        self.store_graph_image(item.key.clone(), image.clone());
                         snapshot::composite_runtime_item(&mut frame, &image, &item);
+                        self.store_graph_image(item.key.clone(), image);
                     }
                 }
             } else if let Some(image) = self.graph_images.get(&item.key) {
                 snapshot::composite_runtime_item(&mut frame, image, &item);
             }
         }
+        if let Some(signature) = signature.as_mut() {
+            // These include generated filter outputs. Record their revisions
+            // after producing them so our own writes do not invalidate reuse.
+            for (key, revision) in &mut signature.revisions {
+                *revision = self.graph_image_revision(key);
+            }
+        }
+        self.native_filter_cache = signature;
     }
 }
 /// Scalar equivalents of 4116F0/4118E0/411A00/4111E0/410D80/411B50.

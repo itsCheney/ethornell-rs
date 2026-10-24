@@ -582,6 +582,7 @@ impl RuntimeTraceApi {
                 let object = self.alloc_input_processor_handle();
                 self.graph_input_objects
                     .insert(object, RuntimeGraphInputObject::new_extended(window));
+                self.display_changes += 1;
                 tracing::debug!(window, object, "Graph91CreateExtendedIconInputProcessor");
                 ethornell_vm::Value::Int(object)
             }
@@ -637,13 +638,41 @@ impl RuntimeTraceApi {
                     4
                 } else if !(0..=128).contains(&volume) {
                     3
-                } else if let Some(bytes) = read_runtime_bytes(&self.manager, "", &path) {
-                    let status = self.graph_effects.configure_media(
-                        bitmap,
-                        String::new(),
-                        path.clone(),
-                        &bytes,
-                    );
+                } else {
+                    #[cfg(feature = "console")]
+                    let status = {
+                        self.sweep_unreferenced_archive_images();
+                        if self.graph_effects.is_movie(bitmap) {
+                            let _ = self.graph_effects.close_movie_slot(bitmap);
+                            self.graph_process_handles.remove(&bitmap);
+                        }
+                        find_runtime_resource(&self.manager, "", &path)
+                            .and_then(|entry| {
+                                self.movie_read_buffer
+                                    .load_decoded(&self.manager, &entry)
+                                    .ok()
+                            })
+                            .map(|bytes| {
+                                self.graph_effects.configure_media(
+                                    bitmap,
+                                    String::new(),
+                                    path.clone(),
+                                    bytes,
+                                )
+                            })
+                            .unwrap_or(2)
+                    };
+                    #[cfg(not(feature = "console"))]
+                    let status = read_runtime_bytes(&self.manager, "", &path)
+                        .map(|bytes| {
+                            self.graph_effects.configure_media(
+                                bitmap,
+                                String::new(),
+                                path.clone(),
+                                crate::MovieBytes::from_vec(bytes),
+                            )
+                        })
+                        .unwrap_or(2);
                     if status == 0 {
                         let options = self
                             .graph_effects
@@ -655,8 +684,6 @@ impl RuntimeTraceApi {
                     } else {
                         status
                     }
-                } else {
-                    2
                 };
                 tracing::debug!(
                     bitmap,
@@ -1006,6 +1033,9 @@ impl RuntimeTraceApi {
                 if !self.graph91_is_window(window) {
                     return Some(Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into())));
                 }
+                // The next message starts at the new cursor; the engine's
+                // one message node can't keep the old text elsewhere.
+                self.message_pages.remove(&window);
                 let state = self.surface_text_states.entry(window).or_default();
                 state.cursor_x = x;
                 state.cursor_y = y;
@@ -1140,29 +1170,20 @@ impl RuntimeTraceApi {
                 // sub_485410 -> sub_434750.
                 let value = pop_int_value(stack).unwrap_or_default();
                 let property = pop_int_value(stack).unwrap_or_default() as u32;
-                // Later builds (the HD edition of Wonderful Everyday sets
-                // 0x80000004 and 0x80000005 to 0) know more properties. They
-                // are kept but nothing reads them yet.
-                if (0x8000_0003..=0x8000_000F).contains(&property) {
-                    tracing::warn!(
-                        property = format_args!("0x{property:08X}"),
-                        value,
-                        "text global property of a later BGI build kept unused"
-                    );
-                } else if !matches!(property, 0 | 0x8000_0000 | 0x8000_0001 | 0x8000_0002) {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "無効なファンクション番号 [ {} ] が指定されました",
-                        property as i32
-                    ))));
+                // BGI 1.622 raises 無効なファンクション番号 for any other
+                // property. Wonderful Everyday's boot script (a different BGI)
+                // sets 0x80000004 and carries on in the original: an unknown
+                // property is ignored.
+                if matches!(property, 0 | 0x8000_0000 | 0x8000_0001 | 0x8000_0002) {
+                    if property == 0x8000_0001 && value < 0 {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "無効なファンクションパラメータ [ {value} ] が指定されました"
+                        ))));
+                    }
+                    self.graph_config
+                        .text_global_properties
+                        .insert(property, value);
                 }
-                if property == 0x8000_0001 && value < 0 {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "無効なファンクションパラメータ [ {value} ] が指定されました"
-                    ))));
-                }
-                self.graph_config
-                    .text_global_properties
-                    .insert(property, value);
                 ethornell_vm::Value::None
             }
             0x9b => {

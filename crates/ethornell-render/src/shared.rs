@@ -64,6 +64,10 @@ pub enum RenderCommand {
         y: f32,
         color: [f32; 4],
         size: f32,
+        /// Distance between the tops of consecutive lines, e.g. a window's
+        /// font height plus its Graph91:89 spacing; `None` for the font's own
+        /// line height.
+        line_height: Option<f32>,
         styles: Vec<TextStyleSpan>,
         glow: Option<TextGlow>,
         clip: Option<[f32; 4]>,
@@ -261,6 +265,7 @@ pub(crate) fn rasterize_text(
     font: &FontArc,
     text: &str,
     px_height: f32,
+    line_pitch: Option<f32>,
     color: [f32; 4],
     styles: &[TextStyleSpan],
 ) -> DecodedImage {
@@ -270,6 +275,9 @@ pub(crate) fn rasterize_text(
     let line_height = (scaled.ascent() - scaled.descent() + scaled.line_gap())
         .ceil()
         .max(px_height.ceil()) as u32;
+    let line_pitch = line_pitch
+        .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+        .unwrap_or(line_height as f32);
     let widths: Vec<u32> = lines
         .iter()
         .map(|line| measure_line(font, line, px_height))
@@ -286,12 +294,12 @@ pub(crate) fn rasterize_text(
         .unwrap_or(1)
         .saturating_add(style_overhang)
         .max(1);
-    let height = (line_height * lines.len().max(1) as u32).max(1);
+    let height = ((lines.len().max(1) - 1) as f32 * line_pitch).ceil() as u32 + line_height;
     let mut rgba = vec![0u8; width as usize * height as usize * 4];
 
     let mut char_index = 0usize;
     for (line_index, line) in lines.iter().enumerate() {
-        let baseline_y = line_index as f32 * line_height as f32 + scaled.ascent();
+        let baseline_y = (line_index as f32 * line_pitch).round() + scaled.ascent();
         let mut cursor_x = 0.0f32;
         for ch in line.chars() {
             let style = text_style_at(styles, char_index);

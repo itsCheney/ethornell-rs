@@ -202,6 +202,7 @@ pub struct HostRuntime {
     paused: u32,
     last_tick: Option<u64>,
     tick_remainder_ns: u64,
+    engine_frames: u64,
     closed: bool,
     audio_suspended: bool,
     vm_budget: ethornell_vm::VmResourceBudget,
@@ -336,6 +337,7 @@ impl HostRuntime {
             paused: 0,
             last_tick: None,
             tick_remainder_ns: 0,
+            engine_frames: 0,
             closed: false,
             audio_suspended: false,
             vm_budget: host_vm_budget(host_physical_memory()),
@@ -455,7 +457,7 @@ impl HostRuntime {
     pub fn diagnostics(&self) -> String {
         let report = self.runtime.last_report.as_ref();
         format!(
-            "stop={:?} pc={} steps={} time_ms={} screen={}x{} surfaces={} textures={} renderer={} pending={} program={:?} vm={:?} image_bytes={} blob_bytes={} program_cache={} cached_instructions={} vm_programs={} vm_instructions={}",
+            "stop={:?} pc={} steps={} time_ms={} screen={}x{} surfaces={} textures={} renderer={} pending={} program={:?} vm={:?} image_bytes={} blob_bytes={} program_cache={} cached_instructions={} vm_programs={} vm_instructions={} movies={:?} engine_frames={}",
             report.map(|r| r.stop_reason),
             report.map_or(0, |r| r.pc),
             report.map_or(0, |r| r.steps),
@@ -494,6 +496,8 @@ impl HostRuntime {
                 .iter()
                 .map(|p| p.instructions.len())
                 .sum::<usize>(),
+            self.runtime.api.graph_effects.movie_diagnostics(),
+            self.engine_frames,
         )
     }
     /// The game text font, for renderers the host builds itself.
@@ -710,8 +714,14 @@ impl HostRuntime {
                         })
                         .unwrap_or(0)
                 };
+                let detail = report.and_then(|r| {
+                    r.recent_trace.iter().rev().find(|line| {
+                        line.starts_with("error:") || line.starts_with("host response failed:")
+                    })
+                });
                 EthornellError::Other(format!(
-                    "{error}; host_runtime_diag:{reason}:{}:{}:{}:{}:{cause}",
+                    "{error}; {}host_runtime_diag:{reason}:{}:{}:{}:{}:{cause}",
+                    detail.map(|line| format!("{line}; ")).unwrap_or_default(),
                     report.map(|r| r.pc as u64).unwrap_or(u64::MAX),
                     report
                         .and_then(|r| r.offset)
@@ -741,9 +751,13 @@ impl HostRuntime {
         if now - last < 16_000_000 {
             return Ok(());
         }
+        self.engine_frames += 1;
         self.last_tick = Some(now);
         let raw_elapsed = elapsed_ms_with_carry(now - last, &mut self.tick_remainder_ns);
         let elapsed = raw_elapsed;
+        #[cfg(feature = "console")]
+        let elapsed =
+            timing::console_engine_elapsed_ms(elapsed, self.runtime.vm.clock_jump_threshold_ms());
         self.runtime
             .vm
             .check_resource_budget(self.vm_budget)
@@ -1364,6 +1378,24 @@ mod tests {
         assert!(create("plain.exe").contains("no packed files"));
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn bootstrap_restart_preserves_session_text_encoding() {
+        let (root, mut host) = minimal_host("encoding-restart");
+        assert_eq!(host.runtime.vm.graph_text_encoding(), encoding_rs::GBK);
+        host.runtime.api.native_system.bootstrap_request = Some((
+            None,
+            "system.arc".into(),
+            "ipl._bp".into(),
+        ));
+        let restarted = host.runtime.take_restart().unwrap();
+        assert_eq!(restarted.vm.graph_text_encoding(), encoding_rs::GBK);
+        drop(restarted);
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     #[cfg(unix)]
     fn public_host_without_surface_halts_and_pause_cancel_clears_gesture_history() {

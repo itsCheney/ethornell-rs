@@ -32,6 +32,10 @@ image = { workspace = true, features = ["ico"] }
 pelite = { version = "0.10", default-features = false, features = ["std"] }
 libc = "0.2"
 
+# Startup text detection is a PC-only capability.
+[target.'cfg(any(target_os="windows",target_os="macos",target_os="linux",target_os="freebsd",target_os="openbsd",target_os="netbsd",target_os="dragonfly",target_os="illumos",target_os="solaris",target_os="haiku"))'.dependencies]
+chardetng = "0.1.17"
+
 [target.'cfg(not(any(target_arch="wasm32",target_os="vita",target_os="horizon")))'.dependencies.wgpu]
 workspace = true
 features = ["dx12", "metal", "webgpu"]
@@ -39,6 +43,9 @@ features = ["dx12", "metal", "webgpu"]
 [target.'cfg(target_arch = "wasm32")'.dependencies.wgpu]
 workspace = true
 features = ["webgl"]
+
+[target.'cfg(target_os = "vita")'.dependencies]
+vitasdk-sys = { version = "=0.3.3", default-features = false, features = ["SceSysmem_stub"] }
 
 [target.'cfg(not(any(target_os="vita",target_os="horizon")))'.dependencies]
 ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", tag = "v0.4.1", features = ["default_font", "lzma", "mp3", "aac", "nellymoser"] }

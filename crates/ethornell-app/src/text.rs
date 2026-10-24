@@ -69,6 +69,28 @@ impl MessageControlTemplate {
     }
 }
 
+/// Child sprite 0 of the message window while a message waits at its end
+/// (`sub_433F40`): frame `index` of the caret table, shown since `shown_at`
+/// at the window-local `(x, y)`; `frame` is `None` for a -1 (hidden) frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MessageCaret {
+    pub(crate) window: i32,
+    pub(crate) index: usize,
+    pub(crate) frame: Option<i32>,
+    pub(crate) shown_at: u32,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MessageTextEnd {
+    pub(crate) window: i32,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) line_start_x: f32,
+    pub(crate) line_height: f32,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeTextNode {
     pub(crate) text: String,
@@ -131,6 +153,20 @@ impl Default for TextState {
             line_height: 32.0,
         }
     }
+}
+
+/// The message text a window holds since it was last cleared. CProcDspMsg
+/// draws each glyph into the window's bitmap at the window's text cursor and
+/// advances it (sub_433A70, sub_42C6E0); only Graph92:8E (sub_440F80) and a
+/// page feed byte 0x0C in a message (vtable+40, sub_433890) clear the bitmap
+/// and send the cursor home. A message started without either continues the
+/// text already there, so a line can be extended in parts.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MessagePage {
+    origin_x: f32,
+    origin_y: f32,
+    /// The parsed, unwrapped text of every message drawn on the page.
+    markup: ParsedMessageMarkup,
 }
 
 impl TextState {
@@ -1082,8 +1118,11 @@ impl RuntimeTraceApi {
             if cursor.font_size > 0 {
                 state.font_size = cursor.font_size as f32;
             }
-            state.line_height =
-                (state.font_size * (100 + surface.line_spacing_percent) as f32 / 100.0).max(1.0);
+            // sub_42C4C0: height + height * spacing / 100 in integers.
+            state.line_height = crate::text_layout::line_pitch(
+                state.font_size,
+                surface.line_spacing_percent,
+            );
         }
         if let Some(style) = target_surface
             .and_then(|id| self.surface_text_states.get(&id))
@@ -1128,6 +1167,8 @@ impl RuntimeTraceApi {
     /// sub_42C990: horizontal windows restart at the valid rectangle's
     /// top-left, vertical ones (variant 1) at its top-right.
     pub(crate) fn reset_window_text_cursor(&mut self, target: i32) {
+        // A message drawn after the cursor went home starts a new page.
+        self.message_pages.remove(&target);
         if let Some(surface) = self.graph_surfaces.get(&target) {
             let x = if surface.message_variant == 1 {
                 surface.valid_right
@@ -1138,6 +1179,71 @@ impl RuntimeTraceApi {
             state.cursor_x = x;
             state.cursor_y = surface.valid_top;
         }
+    }
+
+    /// What Graph92:8E (`sub_440F80`) and a page feed (`sub_433890`) both do
+    /// to a window: `sub_42B9B0` clears its text bitmap, which holds the text
+    /// Graph92:91 drew into it as well as the messages', and `sub_42C5B0`
+    /// sends its text cursor home.
+    pub(crate) fn clear_window_text(&mut self, window: i32) {
+        self.reset_window_text_cursor(window);
+        self.clear_bitmap_text(window);
+        self.surface_text_buffers.insert(window, String::new());
+    }
+
+    /// Lay out a message drawn on `window` after the text its page already
+    /// holds. Returns the layout state (the page's origin), the page's whole
+    /// wrapped text and how many of its characters were already drawn. The
+    /// window's text cursor moves to the end, where the next message starts.
+    fn continue_message_page(
+        &mut self,
+        window: i32,
+        text: &str,
+    ) -> (TextState, ParsedMessageMarkup, usize) {
+        let text = match text.rfind('\x0c') {
+            Some(page_feed) => {
+                self.clear_window_text(window);
+                &text[page_feed + 1..]
+            }
+            None => text,
+        };
+        let mut state = self.window_text_state(Some(window));
+        // `92:9F` stores dword_507650; -1 leaves link glyphs uncoloured.
+        let link_color = (self.system92_text_render_override != -1)
+            .then(|| (self.system92_text_render_override as u32) & 0x00ff_ffff);
+        let next =
+            parse_message_markup_with(text, &mut self.graph_defaults.ruby_registry, link_color);
+        let (page_chars, markup) = match self.message_pages.get(&window) {
+            Some(page) => {
+                // window_text_state measured the room from the cursor; the
+                // page is laid out from its origin.
+                state.width += state.x - page.origin_x;
+                state.height += state.y - page.origin_y;
+                state.x = page.origin_x;
+                state.y = page.origin_y;
+                (
+                    page.markup.text.chars().count(),
+                    append_message_markup(&page.markup, next),
+                )
+            }
+            None => (0, next),
+        };
+        let (parsed, map) = wrap_parsed_message(markup.clone(), &state);
+        self.system92_text_fragment_records = link_fragment_records(&parsed, &state);
+        let committed_chars = map.get(page_chars).copied().unwrap_or_default();
+        let (cursor_x, cursor_y) = message_end_cursor(&parsed.text, &state);
+        let cursor = self.surface_text_states.entry(window).or_default();
+        cursor.cursor_x = cursor_x;
+        cursor.cursor_y = cursor_y;
+        self.message_pages.insert(
+            window,
+            MessagePage {
+                origin_x: state.x,
+                origin_y: state.y,
+                markup,
+            },
+        );
+        (state, parsed, committed_chars)
     }
 
     /// Parse and wrap one message against the process-wide ruby registry.
@@ -1163,17 +1269,9 @@ impl RuntimeTraceApi {
         parsed
     }
 
-    pub(crate) fn start_native_message(
-        &mut self,
-        text: String,
-        target_surface: Option<i32>,
-    ) -> i32 {
-        let state = self.window_text_state(target_surface);
-        let parsed = self.parse_message_with_registry(&text, &state);
-        // The target wrapper installs CProcDspMsg even for an empty or
-        // control-only string. In particular, a lone 0x0A is a zero-delay
-        // layout control, not a synthetic one-glyph message.
-        self.user_controls.remove(&MESSAGE_INPUT_OBJECT_ID);
+    /// The message text node, laid out from `state` on `target_surface`'s
+    /// page (or on the screen).
+    fn place_message_text_node(&mut self, target_surface: Option<i32>, state: &TextState) -> i32 {
         let target = self.ensure_message_text_node();
         if let Some(node) = self.text_nodes.get_mut(&target) {
             node.owner_object = target_surface;
@@ -1190,10 +1288,70 @@ impl RuntimeTraceApi {
                 .map(|surface| surface.z)
                 .unwrap_or(MESSAGE_TEXT_Z);
         }
+        target
+    }
+
+    /// Whether the message text node can take `window`'s page: the engine
+    /// keeps one, so while it shows another window's text, that text stays.
+    pub(crate) fn message_text_node_is_free_for(&self, window: i32) -> bool {
+        self.text_runtime
+            .target_node
+            .and_then(|node| self.text_nodes.get(&node))
+            .map_or(true, |node| {
+                node.target_surface == Some(window) || node.text.is_empty()
+            })
+    }
+
+    /// Graph92:91 on a window (`sub_486500` -> `sub_42B710`): the text is
+    /// drawn at once into the window's text bitmap at its text cursor, and
+    /// the cursor is left after it (`sub_42C700`), as a message's glyphs
+    /// are. So it joins the window's page: a message or another draw after
+    /// it continues after it, and Graph92:8E or a page feed clears it with
+    /// the rest of the page. Returns the text drawn, as laid out on the page.
+    pub(crate) fn draw_window_text_at_once(&mut self, window: i32, text: &str) -> String {
+        let (state, parsed, committed_chars) = self.continue_message_page(window, text);
+        let drawn = parsed.text.chars().skip(committed_chars).collect();
+        let page_chars = parsed.text.chars().count();
+        self.native_message_surface_target = Some(window);
+        let target = self.place_message_text_node(Some(window), &state);
+        self.text_runtime
+            .start_continued_message(parsed, target, page_chars);
+        let text = self.text_runtime.current_visible_text();
+        self.apply_text_to_node(target, text);
+        self.apply_visible_ruby_to_node(target);
+        self.apply_visible_styles_to_node(target);
+        drawn
+    }
+
+    pub(crate) fn start_native_message(
+        &mut self,
+        text: String,
+        target_surface: Option<i32>,
+    ) -> i32 {
+        let (state, parsed, committed_chars) = match target_surface {
+            Some(window) => self.continue_message_page(window, &text),
+            None => {
+                let state = self.window_text_state(None);
+                let parsed = self.parse_message_with_registry(&text, &state);
+                (state, parsed, 0)
+            }
+        };
+        // The target wrapper installs CProcDspMsg even for an empty or
+        // control-only string. In particular, a lone 0x0A is a zero-delay
+        // layout control, not a synthetic one-glyph message.
+        self.user_controls.remove(&MESSAGE_INPUT_OBJECT_ID);
+        // The caret belongs to the previous message's wait.
+        self.message_caret = None;
+        let target = self.place_message_text_node(target_surface, &state);
         self.text_runtime
             .set_glyph_delay_ms(self.graph_defaults.text_animation.glyph_delay_ms);
-        let message_text = parsed.text.clone();
-        self.text_runtime.start_styled_message(parsed, target);
+        let message_text = parsed
+            .text
+            .chars()
+            .skip(committed_chars)
+            .collect::<String>();
+        self.text_runtime
+            .start_continued_message(parsed, target, committed_chars);
         // Graph90:9B is owned by CProcDspMsg (+0x44/+0x48).  Do not also
         // delay the glyph runtime: doing so applies the native procedure
         // wait twice and incorrectly postpones typewriter reveal.
@@ -1203,7 +1361,8 @@ impl RuntimeTraceApi {
         // text-surface reset.  Treating a control-only Graph92:90 invocation
         // as a new visible string makes the completed sentence disappear as
         // soon as the following newline/wait record starts.
-        let has_visible_glyph = message_text.chars().any(|ch| ch != '\n');
+        let has_visible_glyph =
+            target_surface.is_some() || message_text.chars().any(|ch| ch != '\n');
         let initial_visible_text = self.text_runtime.current_visible_text();
         if let Some(node) = self.text_nodes.get_mut(&target) {
             if has_visible_glyph {
@@ -1362,6 +1521,132 @@ impl RuntimeTraceApi {
             node.style_spans.clear();
         }
         self.native_message_active = false;
+        self.message_caret = None;
+    }
+
+    /// One tick of `sub_433F40` while the message waits at its end: the
+    /// first tick shows frame 0 of the Graph90:98 table, every later tick
+    /// at least the Graph90:99 delay after the previous frame shows the next
+    /// one, wrapping. A -1 frame hides the sprite (the blink). The sprite is
+    /// child 0 of the message window, at the text cursor plus the Graph90:9A
+    /// offset, or at the offset itself in mode 1.
+    pub(crate) fn tick_message_caret(&mut self, now_tick: u32) {
+        let frames = &self.graph_defaults.caret_frames;
+        let Some(end) = (!frames.is_empty())
+            .then(|| self.message_text_end())
+            .flatten()
+        else {
+            self.message_caret = None;
+            return;
+        };
+        let delay = self.graph_defaults.caret_frame_delay_ms.max(0) as u32;
+        let index = match self.message_caret {
+            Some(caret) if caret.window == end.window => {
+                if now_tick.wrapping_sub(caret.shown_at) < delay {
+                    return;
+                }
+                (caret.index + 1) % frames.len()
+            }
+            _ => 0,
+        };
+        let defaults = &self.graph_defaults;
+        let (x, y) = if defaults.caret_mode == 1 {
+            (defaults.caret_x as f32, defaults.caret_y as f32)
+        } else {
+            // sub_42C680: the widest frame must fit before the valid
+            // rectangle's right edge, else sub_42C600 starts a new line.
+            let widest = frames
+                .iter()
+                .flatten()
+                .filter_map(|frame| self.bitmap_dimensions.get(frame))
+                .map(|(width, _)| *width as f32)
+                .fold(0.0f32, f32::max);
+            let right = self
+                .graph_surfaces
+                .get(&end.window)
+                .map_or(f32::INFINITY, |surface| surface.valid_right as f32 + 1.0);
+            let (x, y) = if end.x + widest > right {
+                (end.line_start_x, end.y + end.line_height)
+            } else {
+                (end.x, end.y)
+            };
+            (x + defaults.caret_x as f32, y + defaults.caret_y as f32)
+        };
+        self.message_caret = Some(MessageCaret {
+            window: end.window,
+            index,
+            frame: frames[index],
+            shown_at: now_tick,
+            x,
+            y,
+        });
+    }
+
+    /// Where the message window's text ends: the window-local cell top after
+    /// the last glyph, where the next glyph would go.
+    pub(crate) fn message_text_end(&self) -> Option<MessageTextEnd> {
+        let node = self.text_nodes.get(&MESSAGE_TEXT_NODE_ID)?;
+        let window = node.target_surface?;
+        let layout = self.formatted_text_layout(node);
+        let lines = node.text.split('\n').collect::<Vec<_>>();
+        let last = lines.last().copied().unwrap_or_default();
+        let advance = last
+            .chars()
+            .map(|ch| crate::snapshot::glyph_advance(ch, node.size, 100.0))
+            .sum::<f32>();
+        Some(MessageTextEnd {
+            window,
+            x: node.x + advance,
+            y: node.y + layout.body_y_offset + (lines.len() - 1) as f32 * layout.line_height,
+            line_start_x: node.x,
+            line_height: layout.line_height,
+        })
+    }
+
+    /// The caret's frame, drawn by its window after the window's own image
+    /// (the window composes its child sprites over its bitmap).
+    pub(crate) fn push_message_caret_draw_item(
+        &self,
+        items: &mut Vec<crate::graph::RuntimeGraphDrawItem>,
+    ) {
+        let Some(caret) = self.message_caret else {
+            return;
+        };
+        let Some(frame) = caret.frame else {
+            return;
+        };
+        let Some(surface) = self.graph_surfaces.get(&caret.window) else {
+            return;
+        };
+        if !self.surface_display_chain_visible(surface.id, surface) {
+            return;
+        }
+        let Some((key, region)) = self.resource_image_region(frame) else {
+            return;
+        };
+        let (window_x, window_y) = self.surface_world_position(surface.id);
+        items.push(crate::graph::RuntimeGraphDrawItem {
+            owner_object: Some(surface.id),
+            key: key.to_string(),
+            x: window_x + caret.x,
+            y: window_y + caret.y,
+            width: region.width,
+            height: region.height,
+            src_x: region.x,
+            src_y: region.y,
+            src_width: region.width,
+            src_height: region.height,
+            opacity: self.surface_display_opacity(surface.id),
+            ignore_source_alpha: self.bitmap_formats.get(&frame).copied() == Some(1),
+            rotation_degrees: 0.0,
+            destination_quad: None,
+            linear_sampling: true,
+            clip: self.surface_chain_clip(surface.id),
+            z: self.display_tree.effective_depth(surface.id, surface.z),
+            blend_mode: 128,
+            order_serial: self.display_order_serial(surface.id, None).saturating_add(1),
+            hit_id: 0,
+        });
     }
 
     pub(crate) fn tick_text(&mut self, elapsed_ms: u64) {
@@ -1975,6 +2260,15 @@ pub(crate) fn parse_and_wrap_with_registry(
     link_color: Option<u32>,
 ) -> ParsedMessageMarkup {
     let parsed = parse_message_markup_with(text, registry, link_color);
+    wrap_parsed_message(parsed, state).0
+}
+
+/// Wrap parsed message text to the window. Returns the map from each
+/// character index of the parsed text to its index in the wrapped text.
+fn wrap_parsed_message(
+    parsed: ParsedMessageMarkup,
+    state: &TextState,
+) -> (ParsedMessageMarkup, Vec<usize>) {
     let (wrapped, map) = wrap_text_to_state_with_map(&parsed.text, &parsed.ruby_spans, state);
     let ruby_spans = parsed
         .ruby_spans
@@ -2031,13 +2325,85 @@ pub(crate) fn parse_and_wrap_with_registry(
             },
         })
         .collect();
-    ParsedMessageMarkup {
+    let wrapped = ParsedMessageMarkup {
         text: wrapped,
         ruby_spans,
         style_spans,
         link_spans,
         timeline,
-    }
+    };
+    (wrapped, map)
+}
+
+/// `next` drawn after `page`: its spans move past the page's text. Only
+/// `next`'s timeline records are kept; the page's have already run.
+fn append_message_markup(
+    page: &ParsedMessageMarkup,
+    next: ParsedMessageMarkup,
+) -> ParsedMessageMarkup {
+    let offset = page.text.chars().count();
+    let mut out = ParsedMessageMarkup {
+        timeline: Vec::new(),
+        ..page.clone()
+    };
+    out.text.push_str(&next.text);
+    out.ruby_spans
+        .extend(next.ruby_spans.into_iter().map(|span| RuntimeRubySpan {
+            start_char: span.start_char + offset,
+            end_char: span.end_char + offset,
+            reading: span.reading,
+        }));
+    out.style_spans.extend(
+        next.style_spans
+            .into_iter()
+            .map(|span| RuntimeTextStyleSpan {
+                start_char: span.start_char + offset,
+                end_char: span.end_char + offset,
+                style: span.style,
+            }),
+    );
+    out.link_spans
+        .extend(next.link_spans.into_iter().map(|span| RuntimeLinkSpan {
+            start_char: span.start_char + offset,
+            end_char: span.end_char + offset,
+            text: span.text,
+        }));
+    out.timeline = next
+        .timeline
+        .into_iter()
+        .map(|mark| match mark {
+            RuntimeTimelineMark::SetTime { at_char, units } => RuntimeTimelineMark::SetTime {
+                at_char: at_char + offset,
+                units,
+            },
+            RuntimeTimelineMark::Event {
+                at_char,
+                ordinal,
+                id,
+            } => RuntimeTimelineMark::Event {
+                at_char: at_char + offset,
+                ordinal,
+                id,
+            },
+        })
+        .collect();
+    out
+}
+
+/// Where the text cursor stands after `text` (wrapped) is drawn from the
+/// state's origin, measured with the advances text is drawn with.
+fn message_end_cursor(text: &str, state: &TextState) -> (i32, i32) {
+    let row = text.matches('\n').count();
+    let last_line = text.rsplit('\n').next().unwrap_or_default();
+    let size = state.font_size.max(1.0);
+    let advance: f32 = last_line
+        .chars()
+        .map(|ch| crate::snapshot::glyph_advance(ch, size, 100.0))
+        .sum();
+    (
+        (state.x + advance).round() as i32,
+        (state.y + row as f32 * state.line_height).round() as i32,
+    )
 }
 
 /// Fragment records for `92:9E`. Position is estimated from the portable wrap
@@ -2070,14 +2436,25 @@ fn link_fragment_records(
         .collect()
 }
 
+/// Break `text` into the lines the window draws, from its cursor to the
+/// right edge of its valid rectangle (`state.width`): a glyph goes on the
+/// line while it ends at or before that edge (`sub_42C680`), measured with
+/// the glyph advances text is drawn with. Wide (CJK) glyphs break anywhere,
+/// with the kinsoku rules; other glyphs form words that break only at
+/// spaces, as Wonderful Everyday's English build does (the reference build
+/// has no word rule): a word goes on the line if it ends at least one font
+/// height before the edge, or at the edge when it ends in hanging
+/// punctuation, as the target lays out bitmap text (`sub_435290`). A space
+/// never starts a new line: it stays at the end of the line it follows. A
+/// word longer than a whole line breaks by glyph.
 fn wrap_text_to_state_with_map(
     text: &str,
     protected_spans: &[RuntimeRubySpan],
     state: &TextState,
 ) -> (String, Vec<usize>) {
-    let max_units = (state.width.max(120.0) / state.font_size.max(8.0))
-        .floor()
-        .max(8.0);
+    let size = state.font_size.max(1.0);
+    let bound = state.width.max(120.0);
+    let advance = |ch: char| crate::snapshot::glyph_advance(ch, size, 100.0);
     let max_lines = ((state.height.max(state.line_height) / state.line_height.max(1.0)).floor()
         as usize)
         .max(1);
@@ -2091,7 +2468,7 @@ fn wrap_text_to_state_with_map(
     let mut out = String::new();
     let mut map = vec![0usize; chars.len() + 1];
     let mut output_chars = 0usize;
-    let mut line_units = 0.0f32;
+    let mut line_x = 0.0f32;
     let mut lines = 1usize;
     let mut index = 0usize;
     while index < chars.len() {
@@ -2102,50 +2479,84 @@ fn wrap_text_to_state_with_map(
             }
             out.push('\n');
             output_chars += 1;
-            line_units = 0.0;
+            line_x = 0.0;
             lines += 1;
             index += 1;
             continue;
         }
 
         let chunk_end = protected_ends.get(&index).copied().unwrap_or(index + 1);
-        let chunk_units = chars[index..chunk_end]
+        let chunk_width = chars[index..chunk_end]
             .iter()
-            .map(|ch| wrap_char_units(*ch))
+            .map(|ch| advance(*ch))
             .sum::<f32>();
-        let mut projected_units = chunk_units;
-        if chunk_end == index + 1 && is_kinsoku_line_end(chars[index]) {
-            projected_units += chars
-                .get(chunk_end)
-                .filter(|ch| **ch != '\n')
-                .map(|ch| wrap_char_units(*ch))
-                .unwrap_or_default();
-        } else {
-            projected_units += chars[chunk_end..]
+        let single = chunk_end == index + 1;
+        let word_start =
+            single && is_word_char(chars[index]) && (index == 0 || !is_word_char(chars[index - 1]));
+        let needed = if single && chars[index] == ' ' {
+            0.0
+        } else if word_start {
+            let length = chars[index..]
                 .iter()
-                .take_while(|ch| **ch != '\n' && is_kinsoku_line_start(**ch))
-                .map(|ch| wrap_char_units(*ch))
+                .take_while(|ch| is_word_char(**ch))
+                .count();
+            let word = chars[index..index + length]
+                .iter()
+                .map(|ch| advance(*ch))
                 .sum::<f32>();
-        }
-        if line_units > 0.0 && line_units + projected_units > max_units {
+            // sub_435290's rule for bitmap text: keep one font height free
+            // at the right edge unless the word ends in hanging punctuation.
+            let reserve = if crate::text_layout::HANGING.contains(chars[index + length - 1]) {
+                0.0
+            } else {
+                size
+            };
+            if word + reserve > bound { chunk_width } else { word + reserve }
+        } else if single && is_kinsoku_line_end(chars[index]) {
+            chunk_width
+                + chars
+                    .get(chunk_end)
+                    .filter(|ch| **ch != '\n')
+                    .map(|ch| advance(*ch))
+                    .unwrap_or_default()
+        } else {
+            chunk_width
+                + chars[chunk_end..]
+                    .iter()
+                    .take_while(|ch| **ch != '\n' && is_kinsoku_line_start(**ch))
+                    .map(|ch| advance(*ch))
+                    .sum::<f32>()
+        };
+        if line_x > 0.0 && line_x + needed > bound {
             if lines >= max_lines {
                 break;
             }
             out.push('\n');
             output_chars += 1;
-            line_units = 0.0;
+            line_x = 0.0;
             lines += 1;
         }
         for ch in &chars[index..chunk_end] {
             map[index] = output_chars;
             out.push(*ch);
             output_chars += 1;
-            line_units += wrap_char_units(*ch);
+            line_x += advance(*ch);
             index += 1;
         }
     }
     map[index..].fill(output_chars);
     (out, map)
+}
+
+/// Glyphs a line keeps together as a word: all but whitespace and the wide
+/// CJK glyphs (CJK symbols, kana, ideographs, Hangul, full- and half-width
+/// forms).
+fn is_word_char(ch: char) -> bool {
+    !ch.is_whitespace()
+        && !matches!(
+            ch as u32,
+            0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF
+        )
 }
 
 fn is_kinsoku_line_start(ch: char) -> bool {
@@ -2237,6 +2648,76 @@ mod tests {
             color: [1.0; 4],
             line_height: 20.0,
         }
+    }
+
+    fn latin_text_state() -> TextState {
+        // 20 half-width glyphs of 10 px (a 20 px font) per line.
+        TextState {
+            width: 200.0,
+            font_size: 20.0,
+            ..narrow_text_state()
+        }
+    }
+
+    #[test]
+    fn latin_words_wrap_at_spaces() {
+        // Wonderful Everyday's message window moves a word that doesn't fit
+        // to the next line; it was cut after its first letters.
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc dd eeeeee ff", &latin_text_state()),
+            "aaaa bbbb cccc dd \neeeeee ff"
+        );
+        // A word must end one font height (20 px) before the edge...
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc dddd eeee", &latin_text_state()),
+            "aaaa bbbb cccc \ndddd eeee"
+        );
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc ddd eeee", &latin_text_state()),
+            "aaaa bbbb cccc ddd \neeee"
+        );
+        // ...unless it ends in hanging punctuation.
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc dddd! eeee", &latin_text_state()),
+            "aaaa bbbb cccc dddd! \neeee"
+        );
+        // Apostrophes and punctuation belong to their word.
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc dd ee\u{2019}e.", &latin_text_state()),
+            "aaaa bbbb cccc dd \nee\u{2019}e."
+        );
+    }
+
+    #[test]
+    fn wonderful_everydays_message_line_wraps_as_in_the_original() {
+        // The message window: 1,128 px from the cursor to the valid edge,
+        // 14 px per glyph. The original's first line of a narration ends
+        // with a word at 1,036 px (74 glyphs) and moves the next word, which
+        // would end at 1,106 px, to the next line; a line of 78 glyphs (1,092
+        // px) that ends the text stays on one line.
+        let state = TextState {
+            width: 1128.0,
+            font_size: 28.0,
+            line_height: 35.0,
+            height: 208.0,
+            ..narrow_text_state()
+        };
+        let first = format!("aaaa{}", " aaaa".repeat(14));
+        assert_eq!(first.len(), 74);
+        assert_eq!(
+            wrap_text_to_state(&format!("{first} bbbb cc dddddd."), &state),
+            format!("{first} \nbbbb cc dddddd.")
+        );
+        let single = format!("{first} bbb");
+        assert_eq!(wrap_text_to_state(&single, &state), single);
+    }
+
+    #[test]
+    fn a_word_longer_than_a_line_wraps_by_glyph() {
+        assert_eq!(
+            wrap_text_to_state(&"a".repeat(25), &latin_text_state()),
+            format!("{}\n{}", "a".repeat(20), "a".repeat(5))
+        );
     }
 
     #[test]

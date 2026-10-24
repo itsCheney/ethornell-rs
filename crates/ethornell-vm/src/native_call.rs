@@ -15769,6 +15769,12 @@ pub mod opcodes {
         group: 0x92,
         id: 0x1A,
     };
+    /// Not in BGI 1.622's table or the reference build; inferred from Wonderful
+    /// Everyday's `logwnd._bp`: a white outline of a bitmap's opaque pixels.
+    pub const GRAPH92_OUTLINE_BITMAP_HALO: NativeOpcode = NativeOpcode {
+        group: 0x92,
+        id: 0x1B,
+    };
     /// `92:1C` — `Graph92_1C_DrawBitmapTextAndMeasureAdvance`, BGI 1.622 handler `sub_4866A0`.
     ///
     /// Draw plain text into a bitmap and return the widest line advance.
@@ -28301,6 +28307,23 @@ const GRAPH92_INVERT_ALPHA_BITMAP_PARAMETERS: &[NativeParameterSpec] = &[NativeP
     kind: "format-3 bitmap handle",
     description: "Alpha/grayscale bytes inverted in place.",
 }];
+const GRAPH92_OUTLINE_BITMAP_HALO_PARAMETERS: &[NativeParameterSpec] = &[
+    NativeParameterSpec {
+        name: "destination",
+        kind: "bitmap handle",
+        description: "Created as a format-2 bitmap 16 pixels wider and taller than the source.",
+    },
+    NativeParameterSpec {
+        name: "source",
+        kind: "bitmap handle",
+        description: "Bitmap whose opaque pixels (text) are outlined.",
+    },
+    NativeParameterSpec {
+        name: "width",
+        kind: "i32",
+        description: "Outline width in pixels (1 in logwnd._bp).",
+    },
+];
 const GRAPH92_COMPOSE_ALPHA_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec { name: "destination_gray", kind: "bitmap handle", description: "Required native bitmap slot." },
     NativeParameterSpec { name: "x", kind: "i32", description: "Native positional integer." },
@@ -35090,7 +35113,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CARET_FRAMES_PARAMETERS,
         returns: "void; target errors on an invalid bitmap entry",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47ECD0 -> sub_4336D0: caret frames; a bitmap that is missing or incompatible is fatal.",
+        notes: "sub_47ECD0 -> sub_4336D0: caret frames; a bitmap that is missing or incompatible is fatal. The portable VM copies and validates the BP bitmap table; while a message waits at its end the host draws the frames as the message window's child sprite (the reference build's sub_433F40, GraphApi::tick_native_message_caret).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_MESSAGE_CARET_FRAME_DELAY,
@@ -35787,6 +35810,14 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
         notes: "sub_486560 -> sub_403C20: source, second source, screen-sized destination, pixel-mode match with target texts.",
+    },
+    NativeOpcodeSpec {
+        opcode: opcodes::GRAPH92_OUTLINE_BITMAP_HALO,
+        symbol: "Graph92_1B_OutlineBitmapHalo",
+        parameters: GRAPH92_OUTLINE_BITMAP_HALO_PARAMETERS,
+        returns: "void",
+        scheduling: NativeSchedulingEffect::Continue,
+        notes: "Absent from the reference build's dispatch table, and Wonderful Everyday's executable is encrypted (SteamStub), so the behaviour is inferred from its only caller, logwnd._bp: per log entry it copies the entry's text bitmap into X (90:18 mode 0x80), calls 92:1B(B, X, 1), copies B into a cleared format-2 bitmap of B's size (91:1D type 0) and blends that over X at (-8, -8) with transparency 64 (90:18 mode 1). The original's log text has a light edge about one pixel wide around dark glyphs. Portable: B is X plus 8 pixels on every side, white, with the alpha of X's coverage summed over a (2 * width + 1) square box (capped at 255, as the text glow of style mode 2) outside X's own coverage, so the blend outlines the glyphs without lightening them.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAW_BITMAP_TEXT_MEASURE,
@@ -38558,7 +38589,7 @@ const TARGET_CONFIRMED_OPCODES: &[NativeOpcode] = &[
     opcodes::SOUND_PLAY_WAVE_ASYNC,
 ];
 
-const TARGET_INFERRED_OPCODES: &[NativeOpcode] = &[];
+const TARGET_INFERRED_OPCODES: &[NativeOpcode] = &[opcodes::GRAPH92_OUTLINE_BITMAP_HALO];
 
 const ABI_ONLY_DOCUMENTED_OPCODES: &[NativeOpcode] = &[];
 
@@ -39221,6 +39252,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
+    opcodes::GRAPH92_OUTLINE_BITMAP_HALO,
     opcodes::SYS_GET_SPECIAL_FOLDER,
     opcodes::SYS81_SHOW_RESOURCE_FILE_DIALOG,
     opcodes::SYS81_BROWSE_FOLDER,

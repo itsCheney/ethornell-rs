@@ -2090,6 +2090,7 @@ impl RuntimeTraceApi {
             secondary,
             transition_value,
             scale_x as u32,
+            true,
         ) else {
             self.graph_layers.remove(&mode5.node_id);
             return false;
@@ -2133,8 +2134,11 @@ impl RuntimeTraceApi {
                     .wrapping_shl(16)
                     .wrapping_add(project(mode5.position_y) & 65535),
             ];
+            let Some(image) = prepared.image.as_ref() else {
+                return false;
+            };
             let raster = crate::native_effector::native_inverse_affine(
-                &prepared.image,
+                image,
                 [width, height],
                 destination,
                 [ax, ay, angle, sx, sy],
@@ -3113,6 +3117,7 @@ impl RuntimeTraceApi {
                         "これ以上、スプライトオブジェクトを生成する事は出来ません".into(),
                     )));
                 }
+                self.display_changes += 1;
                 tracing::info!(sprite = handle, "GraphCreateSpriteObject");
                 ethornell_vm::Value::Int(handle)
             }
@@ -3151,6 +3156,7 @@ impl RuntimeTraceApi {
                         "無効なスプライトハンドルが指定されました".to_string(),
                     )));
                 }
+                self.display_changes += 1;
                 tracing::debug!(handle, "GraphReleaseSpriteObject");
                 ethornell_vm::Value::None
             }

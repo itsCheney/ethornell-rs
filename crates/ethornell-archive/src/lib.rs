@@ -462,7 +462,11 @@ impl ResourceManager {
         }
         let key = archive_name_key(name);
         let mut search = self.inner.search.write().expect("resource search poisoned");
-        if search.composites.iter().any(|(existing, _)| *existing == key) {
+        if search
+            .composites
+            .iter()
+            .any(|(existing, _)| *existing == key)
+        {
             return false;
         }
         search.composites.push((key, members));
@@ -604,21 +608,116 @@ impl ResourceManager {
         let raw = self.read_by_entry_bytes(entry, true)?;
         decode_payload_owned(&entry.entry_name, raw, &self.inner.limits)
     }
+
+    /// Read a decoded entry into a caller-owned buffer.  Console movie playback
+    /// keeps this buffer reserved while the heap is still contiguous, avoiding
+    /// a multi-megabyte allocation in the middle of a scene transition.
+    pub fn read_by_entry_decoded_into(
+        &self,
+        entry: &ResourceEntry,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let archive_index = self.archive_index_for_path(&entry.archive_path)?;
+        let key = normalize_resource_name(&entry.entry_name);
+        let candidates = self.inner.by_name.get(&key).ok_or_else(|| {
+            EthornellError::Parse(format!(
+                "resource entry not found: {}:{}",
+                entry.archive_path.display(),
+                entry.entry_name
+            ))
+        })?;
+        let entry_index = candidates
+            .iter()
+            .filter(|&&(candidate_archive, _)| candidate_archive == archive_index)
+            .find_map(|&(_, candidate_entry)| {
+                let candidate = self.inner.set.archives[archive_index]
+                    .entries
+                    .get(candidate_entry)?;
+                (candidate.name == entry.entry_name && candidate.packed_size == entry.packed_size)
+                    .then_some(candidate_entry)
+            })
+            .ok_or_else(|| {
+                EthornellError::Parse(format!(
+                    "resource entry not found: {}:{}",
+                    entry.archive_path.display(),
+                    entry.entry_name
+                ))
+            })?;
+        self.read_locator_decoded_into(archive_index, entry_index, out)
+    }
+
+    /// Read an ordinary decoded entry directly into caller-owned storage.
+    ///
+    /// This is used by the Vita movie path, whose reusable MPEG buffer lives
+    /// in CDRAM rather than the application's constrained user heap.  Wrapped
+    /// formats still need an owned temporary decode buffer and are rejected.
+    pub fn read_by_entry_decoded_to_slice(
+        &self,
+        entry: &ResourceEntry,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        let archive_index = self.archive_index_for_path(&entry.archive_path)?;
+        let key = normalize_resource_name(&entry.entry_name);
+        let candidates = self.inner.by_name.get(&key).ok_or_else(|| {
+            EthornellError::Parse(format!(
+                "resource entry not found: {}:{}",
+                entry.archive_path.display(),
+                entry.entry_name
+            ))
+        })?;
+        let entry_index = candidates
+            .iter()
+            .filter(|&&(candidate_archive, _)| candidate_archive == archive_index)
+            .find_map(|&(_, candidate_entry)| {
+                let candidate = self.inner.set.archives[archive_index]
+                    .entries
+                    .get(candidate_entry)?;
+                (candidate.name == entry.entry_name && candidate.packed_size == entry.packed_size)
+                    .then_some(candidate_entry)
+            })
+            .ok_or_else(|| {
+                EthornellError::Parse(format!(
+                    "resource entry not found: {}:{}",
+                    entry.archive_path.display(),
+                    entry.entry_name
+                ))
+            })?;
+        self.read_locator_decoded_to_slice(archive_index, entry_index, out)
+    }
     /// Size of the same decoded payload returned by read_by_entry_decoded.
     /// Read at most a stack header from the retained authorized archive FD;
     /// never reopen a checked path or allocate/decompress the whole resource.
-    pub fn decoded_size_by_entry(&self,entry:&ResourceEntry)->Result<u64> {
+    pub fn decoded_size_by_entry(&self, entry: &ResourceEntry) -> Result<u64> {
         if let Some(bytes) = self.read_overlay(entry) {
             return Ok(decode_payload_owned(&entry.entry_name, bytes?, &self.inner.limits)?.len() as u64);
         }
-        let index=self.archive_index_for_path(&entry.archive_path)?;
-        let archive=&self.inner.set.archives[index];
-        let actual=archive.entries.iter().find(|e|e.name==entry.entry_name && e.packed_size==entry.packed_size).ok_or_else(||EthornellError::Parse("entry not indexed".into()))?;
-        checked_buffer_size(actual.packed_size,self.inner.limits.max_packed_bytes,"packed bytes")?;
-        let mut file=self.inner.archive_files[index].lock().map_err(|_|EthornellError::Other("archive handle poisoned".into()))?;
-        if actual.offset.checked_add(actual.packed_size).is_none_or(|end|end>file.byte_len().unwrap_or(0)) {return Err(EthornellError::Parse("entry range invalid".into()));}
-        file.seek(SeekFrom::Start(actual.offset))?;let mut header=[0u8;32];let count=actual.packed_size.min(32)as usize;file.read_exact(&mut header[..count])?;
-        Ok(check_decoded_size(&header[..count],actual.packed_size,&self.inner.limits)? as u64)
+        let index = self.archive_index_for_path(&entry.archive_path)?;
+        let archive = &self.inner.set.archives[index];
+        let actual = archive
+            .entries
+            .iter()
+            .find(|e| e.name == entry.entry_name && e.packed_size == entry.packed_size)
+            .ok_or_else(|| EthornellError::Parse("entry not indexed".into()))?;
+        checked_buffer_size(
+            actual.packed_size,
+            self.inner.limits.max_packed_bytes,
+            "packed bytes",
+        )?;
+        let mut file = self.inner.archive_files[index]
+            .lock()
+            .map_err(|_| EthornellError::Other("archive handle poisoned".into()))?;
+        if actual
+            .offset
+            .checked_add(actual.packed_size)
+            .is_none_or(|end| end > file.byte_len().unwrap_or(0))
+        {
+            return Err(EthornellError::Parse("entry range invalid".into()));
+        }
+        file.seek(SeekFrom::Start(actual.offset))?;
+        let mut header = [0u8; 32];
+        let count = actual.packed_size.min(32) as usize;
+        file.read_exact(&mut header[..count])?;
+        Ok(check_decoded_size(&header[..count], actual.packed_size, &self.inner.limits)? as u64)
     }
 
     fn find_locator(&self, name: &str) -> Option<(usize, usize)> {
@@ -702,6 +801,77 @@ impl ResourceManager {
         let name = entry.name.clone();
         let raw = self.read_locator_bytes(archive_index, entry_index, true)?;
         decode_payload_owned(&name, raw, &self.inner.limits)
+    }
+
+    fn read_locator_decoded_into(
+        &self,
+        archive_index: usize,
+        entry_index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let archive = self.inner.set.archives.get(archive_index).ok_or_else(|| {
+            EthornellError::Parse(format!("archive index out of range: {archive_index}"))
+        })?;
+        let entry = archive.entries.get(entry_index).ok_or_else(|| {
+            EthornellError::Parse(format!(
+                "resource entry index out of range: {archive_index}:{entry_index}"
+            ))
+        })?;
+        let file = self.inner.archive_files.get(archive_index).ok_or_else(|| {
+            EthornellError::Parse(format!(
+                "archive handle index out of range: {archive_index}"
+            ))
+        })?;
+        let mut file = file.lock().map_err(|_| {
+            EthornellError::Other(format!(
+                "archive handle poisoned: {}",
+                archive.path.display()
+            ))
+        })?;
+        read_entry_from_file_into(&mut **file, entry, &self.inner.limits, true, out)?;
+        if out.starts_with(MAGIC_DSC_FORMAT) {
+            let decoded = dsc_decode_with_limits(out, self.inner.limits).map_err(|err| {
+                EthornellError::UnsupportedFormat(format!(
+                    "DSC decode failed for {}: {err}",
+                    entry.name
+                ))
+            })?;
+            *out = decoded;
+        } else if out.starts_with(b"BSE 1.") {
+            return Err(EthornellError::UnsupportedFormat(format!(
+                "BSE wrapped entry is not decoded yet: {}",
+                entry.name
+            )));
+        }
+        Ok(())
+    }
+
+    fn read_locator_decoded_to_slice(
+        &self,
+        archive_index: usize,
+        entry_index: usize,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        let archive = self.inner.set.archives.get(archive_index).ok_or_else(|| {
+            EthornellError::Parse(format!("archive index out of range: {archive_index}"))
+        })?;
+        let entry = archive.entries.get(entry_index).ok_or_else(|| {
+            EthornellError::Parse(format!(
+                "resource entry index out of range: {archive_index}:{entry_index}"
+            ))
+        })?;
+        let file = self.inner.archive_files.get(archive_index).ok_or_else(|| {
+            EthornellError::Parse(format!(
+                "archive handle index out of range: {archive_index}"
+            ))
+        })?;
+        let mut file = file.lock().map_err(|_| {
+            EthornellError::Other(format!(
+                "archive handle poisoned: {}",
+                archive.path.display()
+            ))
+        })?;
+        read_entry_from_file_to_slice(&mut **file, entry, &self.inner.limits, out)
     }
 
     fn archive_index_for_path(&self, path: &Path) -> Result<usize> {
@@ -1101,6 +1271,86 @@ fn read_entry_from_file<R: ArchiveSource + ?Sized>(
     let mut data = zeroed_buffer(size)?;
     file.read_exact(&mut data)?;
     Ok(data)
+}
+
+fn read_entry_from_file_into<R: ArchiveSource + ?Sized>(
+    file: &mut R,
+    entry: &ArchiveEntry,
+    limits: &ResourceBudget,
+    decoded: bool,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let size = checked_buffer_size(entry.packed_size, limits.max_packed_bytes, "packed bytes")?;
+    let end = entry
+        .offset
+        .checked_add(entry.packed_size)
+        .ok_or_else(|| EthornellError::Parse("entry range overflows".into()))?;
+    if end > file.byte_len()? {
+        return Err(EthornellError::Parse(
+            "entry extends past archive end".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(entry.offset))?;
+    if decoded {
+        if let Some(size) = entry.unpacked_size {
+            checked_buffer_size(size, limits.max_decoded_bytes, "declared decoded bytes")?;
+        }
+        let mut header = [0u8; 0x20];
+        let header_len = size.min(header.len());
+        file.read_exact(&mut header[..header_len])?;
+        check_decoded_size(&header[..header_len], entry.packed_size, limits)?;
+        file.seek(SeekFrom::Start(entry.offset))?;
+    }
+    out.clear();
+    out.try_reserve_exact(size)
+        .map_err(|err| EthornellError::Parse(format!("resource allocation failed: {err}")))?;
+    out.resize(size, 0);
+    file.read_exact(out)?;
+    Ok(())
+}
+
+fn read_entry_from_file_to_slice<R: ArchiveSource + ?Sized>(
+    file: &mut R,
+    entry: &ArchiveEntry,
+    limits: &ResourceBudget,
+    out: &mut [u8],
+) -> Result<usize> {
+    let size = checked_buffer_size(entry.packed_size, limits.max_packed_bytes, "packed bytes")?;
+    if size > out.len() {
+        return Err(EthornellError::Parse(format!(
+            "caller buffer is too small for {}: {} < {size}",
+            entry.name,
+            out.len()
+        )));
+    }
+    let end = entry
+        .offset
+        .checked_add(entry.packed_size)
+        .ok_or_else(|| EthornellError::Parse("entry range overflows".into()))?;
+    if end > file.byte_len()? {
+        return Err(EthornellError::Parse(
+            "entry extends past archive end".into(),
+        ));
+    }
+    if let Some(size) = entry.unpacked_size {
+        checked_buffer_size(size, limits.max_decoded_bytes, "declared decoded bytes")?;
+    }
+    file.seek(SeekFrom::Start(entry.offset))?;
+    let mut header = [0u8; 0x20];
+    let header_len = size.min(header.len());
+    file.read_exact(&mut header[..header_len])?;
+    check_decoded_size(&header[..header_len], entry.packed_size, limits)?;
+    if header[..header_len].starts_with(MAGIC_DSC_FORMAT)
+        || header[..header_len].starts_with(b"BSE 1.")
+    {
+        return Err(EthornellError::UnsupportedFormat(format!(
+            "entry requires an owned decode buffer: {}",
+            entry.name
+        )));
+    }
+    file.seek(SeekFrom::Start(entry.offset))?;
+    file.read_exact(&mut out[..size])?;
+    Ok(size)
 }
 
 pub fn extract_archive(path: &Path, output_dir: &Path) -> Result<ExtractSummary> {
@@ -1562,12 +1812,21 @@ impl<'a> BitReader<'a> {
 mod tests {
     #[test]
     fn decoded_length_header_rejects_oversize_and_reports_dsc_payload_not_archive_size() {
-        let mut header=[0u8;32];header[..super::MAGIC_DSC_FORMAT.len()].copy_from_slice(super::MAGIC_DSC_FORMAT);
+        let mut header = [0u8; 32];
+        header[..super::MAGIC_DSC_FORMAT.len()].copy_from_slice(super::MAGIC_DSC_FORMAT);
         header[0x14..0x18].copy_from_slice(&1_030_814u32.to_le_bytes());
-        assert_eq!(super::check_decoded_size(&header,464_347,&super::ResourceBudget::android()).unwrap(),1_030_814);
+        assert_eq!(
+            super::check_decoded_size(&header, 464_347, &super::ResourceBudget::android()).unwrap(),
+            1_030_814
+        );
         header[0x14..0x18].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(super::check_decoded_size(&header,464_347,&super::ResourceBudget::android()).is_err());
-        assert!(super::check_decoded_size(&header[..16],16,&super::ResourceBudget::android()).is_err());
+        assert!(
+            super::check_decoded_size(&header, 464_347, &super::ResourceBudget::android()).is_err()
+        );
+        assert!(
+            super::check_decoded_size(&header[..16], 16, &super::ResourceBudget::android())
+                .is_err()
+        );
     }
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2047,7 +2306,10 @@ mod tests {
         let fallback = manager.find_in_archive("data05xxx.arc", "only03").unwrap();
         assert_eq!(fallback.archive_path, PathBuf::from("game/data03000.arc"));
         assert_eq!(
-            manager.first_in_archive("data05xxx.arc").unwrap().archive_path,
+            manager
+                .first_in_archive("data05xxx.arc")
+                .unwrap()
+                .archive_path,
             PathBuf::from("game/data05000.arc")
         );
     }

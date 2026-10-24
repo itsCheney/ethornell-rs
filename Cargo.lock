@@ -1165,6 +1165,7 @@ name = "ethornell-app"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "chardetng",
  "encoding_rs",
  "ethornell-archive",
  "ethornell-audio",
@@ -1182,6 +1183,7 @@ dependencies = [
  "ruffle_render_wgpu",
  "serde_json",
  "tracing",
+ "vitasdk-sys",
  "wgpu 0.19.4",
  "winit 0.31.0-beta.3",
 ]
@@ -1275,6 +1277,7 @@ dependencies = [
  "encoding_rs",
  "ethornell-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4829,6 +4832,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vitasdk-sys"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "665d8a491ad572e0ebc103846c4a51e66b641c942391b7241f91c413a3a301a9"
 
 [[package]]
 name = "walkdir"

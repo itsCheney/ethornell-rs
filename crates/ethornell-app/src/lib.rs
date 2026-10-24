@@ -78,6 +78,10 @@ mod runtime_frontend;
 mod scenario;
 mod scene;
 mod snapshot;
+#[cfg(desktop_host)]
+mod text_encoding;
+#[cfg(desktop_host)]
+pub use text_encoding::TextEncoding;
 mod surface_controls;
 mod target_checks;
 mod text;
@@ -194,13 +198,13 @@ fn detect_game_id_from_bootstrap(program: &ethornell_script::BpProgram) -> Optio
         let following = program.instructions.iter().skip(index + 1).take(6);
         let mut candidate = None;
         for instruction in following {
-            if instruction.opcode_name == "streq" {
+            if instruction.opcode.name() == "streq" {
                 if candidate.is_some() {
                     return candidate;
                 }
                 break;
             }
-            if let [ethornell_script::BpOperand::String(value)] = instruction.operands.as_slice()
+            if let [ethornell_script::BpOperand::String(value)] = instruction.operands.as_ref()
                 && !value.is_empty()
             {
                 candidate = Some(value.clone());
@@ -247,6 +251,9 @@ const CONFIRMED_TITLE_FNV: u64 = 0xc6bdd0d97d4f4893;
 const CONFIRMED_TITLE_LEN: usize = 26272;
 
 pub struct AppConfig {
+    /// None uses ETHORNELL_TEXT_ENCODING, then Auto. An explicit choice wins.
+    #[cfg(desktop_host)]
+    pub text_encoding: Option<TextEncoding>,
     pub game_root: GameRoot,
     pub trace: bool,
     pub fail_on_stub: bool,
@@ -298,6 +305,16 @@ pub fn run(config: AppConfig) -> Result<()> {
         "archive-backed resource manager ready"
     );
 
+    #[cfg(desktop_host)]
+    let encoding = match config.text_encoding {
+        Some(choice) => choice.resolve(&manager),
+        None => text_encoding::select(
+            &manager,
+            std::env::var("ETHORNELL_TEXT_ENCODING").ok().as_deref(),
+        ),
+    };
+    #[cfg(not(desktop_host))]
+    let encoding = encoding_rs::SHIFT_JIS;
     let bgm = load_runtime_bgm(&manager);
     let native_root = game_root_path(&manager);
     tracing::info!(
@@ -325,6 +342,7 @@ pub fn run(config: AppConfig) -> Result<()> {
                 config.trace,
                 config.fail_on_stub,
                 !headless,
+                encoding,
             )),
             Err(err) => {
                 tracing::warn!(script, %err, "startup script unavailable");
@@ -597,6 +615,144 @@ struct NativeControlInputLatch {
     auxiliary_serial: u64,
 }
 
+const MOVIE_READ_BUFFER_SIZE: usize = 12 * 1024 * 1024;
+
+/// Storage for a compressed MPEG program stream while its decoder is built.
+/// Vita's CDRAM is separate from the 320 MiB user heap used by scene images.
+enum MovieReadBuffer {
+    Heap(Vec<u8>),
+    #[cfg(target_os = "vita")]
+    Cdram(Option<VitaMovieReadBuffer>),
+}
+
+#[derive(Debug)]
+pub(crate) enum MovieBytes {
+    Heap(std::sync::Arc<[u8]>),
+    #[cfg(target_os = "vita")]
+    Cdram {
+        buffer: std::sync::Arc<VitaMovieReadBuffer>,
+        len: usize,
+    },
+}
+
+impl MovieBytes {
+    pub(crate) fn from_vec(bytes: Vec<u8>) -> Self {
+        Self::Heap(bytes.into())
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Heap(bytes) => bytes,
+            #[cfg(target_os = "vita")]
+            Self::Cdram { buffer, len } => &buffer.as_slice()[..*len],
+        }
+    }
+}
+
+impl MovieReadBuffer {
+    fn new() -> Self {
+        #[cfg(target_os = "vita")]
+        if let Some(buffer) = VitaMovieReadBuffer::new(MOVIE_READ_BUFFER_SIZE) {
+            return Self::Cdram(Some(buffer));
+        }
+
+        let mut buffer = Vec::new();
+        #[cfg(feature = "console")]
+        let _ = buffer.try_reserve_exact(MOVIE_READ_BUFFER_SIZE);
+        Self::Heap(buffer)
+    }
+
+    fn load_decoded(
+        &mut self,
+        manager: &ResourceManager,
+        entry: &ethornell_archive::ResourceEntry,
+    ) -> Result<MovieBytes> {
+        match self {
+            Self::Heap(buffer) => {
+                manager.read_by_entry_decoded_into(entry, buffer)?;
+                Ok(MovieBytes::from_vec(std::mem::take(buffer)))
+            }
+            #[cfg(target_os = "vita")]
+            Self::Cdram(slot) => {
+                if slot.is_none() {
+                    *slot = VitaMovieReadBuffer::new(MOVIE_READ_BUFFER_SIZE);
+                }
+                let buffer = slot.as_mut().ok_or_else(|| {
+                    EthornellError::Parse("unable to allocate Vita CDRAM movie buffer".into())
+                })?;
+                let len = manager.read_by_entry_decoded_to_slice(entry, buffer.as_mut_slice())?;
+                let buffer = slot
+                    .take()
+                    .expect("movie buffer must be present after read");
+                Ok(MovieBytes::Cdram {
+                    buffer: std::sync::Arc::new(buffer),
+                    len,
+                })
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "vita")]
+#[derive(Debug)]
+struct VitaMovieReadBuffer {
+    uid: i32,
+    ptr: *mut u8,
+    len: usize,
+}
+
+#[cfg(target_os = "vita")]
+impl VitaMovieReadBuffer {
+    fn new(len: usize) -> Option<Self> {
+        use vitasdk_sys::{
+            SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, sceKernelAllocMemBlock, sceKernelFreeMemBlock,
+            sceKernelGetMemBlockBase,
+        };
+
+        let size = u32::try_from(len).ok()?;
+        let uid = unsafe {
+            sceKernelAllocMemBlock(
+                c"ethornell-movie".as_ptr(),
+                SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW,
+                size,
+                std::ptr::null_mut(),
+            )
+        };
+        if uid < 0 {
+            return None;
+        }
+        let mut ptr = std::ptr::null_mut();
+        if unsafe { sceKernelGetMemBlockBase(uid, &mut ptr) } < 0 || ptr.is_null() {
+            unsafe {
+                sceKernelFreeMemBlock(uid);
+            }
+            return None;
+        }
+        Some(Self {
+            uid,
+            ptr: ptr.cast(),
+            len,
+        })
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+#[cfg(target_os = "vita")]
+impl Drop for VitaMovieReadBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            vitasdk_sys::sceKernelFreeMemBlock(self.uid);
+        }
+    }
+}
+
 struct RuntimeTraceApi {
     host: host_runtime::HostServices,
     manager: ResourceManager,
@@ -650,6 +806,9 @@ struct RuntimeTraceApi {
     debug_graph: bool,
     trace_render_tree: bool,
     graph_trace: VecDeque<String>,
+    /// Reusable storage for the next MPEG program stream.  On Vita it lives in
+    /// CDRAM, preserving the constrained user heap for scene images.
+    movie_read_buffer: MovieReadBuffer,
     graph_images: BTreeMap<String, DecodedImage>,
     /// Native bitmap format associated with decoded resource images. Resource
     /// pixels are cached independently of concrete bitmap handles, so the
@@ -704,6 +863,7 @@ struct RuntimeTraceApi {
     native_effector_rasters: BTreeMap<i32, native_effector::EffectorRaster>,
     native_maps: BTreeMap<i32, native_map_filter::NativeMap>,
     native_filters: BTreeMap<i32, native_map_filter::NativeFilter>,
+    native_filter_cache: Option<native_map_filter::FilterCacheSignature>,
     native_projection_mips: BTreeMap<i32, native_projected_source::ProjectionMipCache>,
     native_mode6_rasters: BTreeMap<i32, native_sprite_perspective::Mode6Raster>,
     native_vm_effect_bindings: BTreeMap<i32, [(i32, u64); 2]>,
@@ -731,6 +891,11 @@ struct RuntimeTraceApi {
     fullwidth_glyph_cell_width: i32,
     surface_text_states: BTreeMap<i32, SurfaceTextState>,
     surface_text_buffers: BTreeMap<i32, String>,
+    /// Message text each window holds since its last clear (`text::MessagePage`).
+    message_pages: BTreeMap<i32, text::MessagePage>,
+    /// Display objects created or released so far: icon processors,
+    /// windows, sprites and groups (see `RuntimeEngine::run_frame`).
+    display_changes: u64,
     /// Target CDspObjKnob registry: 32 slots, handles 0xF0000000 | slot.
     graph_knob_states: BTreeMap<i32, GraphKnobState>,
     /// Knob→target is a control pointer, not a CDspObj member/parent edge.
@@ -900,6 +1065,8 @@ struct RuntimeTraceApi {
     scenario_bootstrapped: bool,
     native_message_active: bool,
     native_message_surface_target: Option<i32>,
+    /// The end-of-text caret of the message waiting at its end (`sub_433F40`).
+    message_caret: Option<text::MessageCaret>,
     pending_scenario_bootstrap: Option<(String, String, Vec<u8>)>,
     scenario_playback: Option<ScenarioPlayback>,
     scenario_input_latched: bool,
@@ -1131,6 +1298,7 @@ impl RuntimeTraceApi {
             debug_graph: std::env::var("DEBUG").ok().as_deref() == Some("1"),
             trace_render_tree: std::env::var_os("TRACE_RENDER_TREE").is_some(),
             graph_trace: VecDeque::new(),
+            movie_read_buffer: MovieReadBuffer::new(),
             graph_images: BTreeMap::from([(
                 native_background::BACK_INACTIVE_FILL_KEY.to_string(),
                 DecodedImage {
@@ -1174,6 +1342,7 @@ impl RuntimeTraceApi {
             native_effector_rasters: BTreeMap::new(),
             native_maps: BTreeMap::new(),
             native_filters: BTreeMap::new(),
+            native_filter_cache: None,
             native_projection_mips: BTreeMap::new(),
             native_mode6_rasters: BTreeMap::new(),
             native_vm_effect_bindings: BTreeMap::new(),
@@ -1197,6 +1366,8 @@ impl RuntimeTraceApi {
             fullwidth_glyph_cell_width: 0,
             surface_text_states: BTreeMap::new(),
             surface_text_buffers: BTreeMap::new(),
+            message_pages: BTreeMap::new(),
+            display_changes: 0,
             graph_knob_states: BTreeMap::new(),
             graph_knob_watches: VecDeque::new(),
             graph_knob_input_mode: 0,
@@ -1300,6 +1471,7 @@ impl RuntimeTraceApi {
             scenario_bootstrapped: false,
             native_message_active: false,
             native_message_surface_target: None,
+            message_caret: None,
             pending_scenario_bootstrap: None,
             scenario_playback: None,
             scenario_input_latched: false,
@@ -1532,6 +1704,13 @@ impl RuntimeTraceApi {
     }
 
     fn store_graph_image(&mut self, key: String, image: DecodedImage) {
+        // Vita cannot retain whole startup atlases for another 60 frames while
+        // the next scene is loading. Sweep after this VM pass, once all newly
+        // loaded images have been bound to their bitmap slots/layers.
+        #[cfg(target_os = "vita")]
+        if !key.starts_with("runtime:") && key.contains(':') {
+            self.image_sweep_countdown = 0;
+        }
         let revision = self.next_graph_image_revision;
         self.next_graph_image_revision = self.next_graph_image_revision.wrapping_add(1).max(1);
         self.graph_images.insert(key.clone(), image);
@@ -1564,9 +1743,19 @@ impl RuntimeTraceApi {
         // stay valid until moviemngr._bp refreshes them (90:53).
         if self.graph_resources.contains_key(&bitmap)
             && self.bitmap_dimensions.get(&bitmap) == Some(&(width, height))
-            && self.replace_graph_bitmap_pixels(bitmap, update.image.clone())
         {
-            return;
+            #[cfg(feature = "console")]
+            {
+                // The movie slot is initialized before playback.  Replacing
+                // its pixels consumes the newly decoded image directly,
+                // avoiding a second 720p RGBA allocation on consoles.
+                let _ = self.replace_graph_bitmap_pixels(bitmap, update.image);
+                return;
+            }
+            #[cfg(not(feature = "console"))]
+            if self.replace_graph_bitmap_pixels(bitmap, update.image.clone()) {
+                return;
+            }
         }
         let key = format!("runtime:movie:{bitmap}");
         self.store_graph_image(key.clone(), update.image);
@@ -1593,13 +1782,20 @@ impl RuntimeTraceApi {
         resource: &str,
         size: (i32, i32),
     ) -> Option<(i32, i32)> {
-        let bytes = read_runtime_bytes(&self.manager, archive, resource)?;
+        #[cfg(feature = "console")]
+        let bytes = {
+            self.sweep_unreferenced_archive_images();
+            let entry = find_runtime_resource(&self.manager, archive, resource)?;
+            self.movie_read_buffer.load_decoded(&self.manager, &entry).ok()?
+        };
+        #[cfg(not(feature = "console"))]
+        let bytes = MovieBytes::from_vec(read_runtime_bytes(&self.manager, archive, resource)?);
         let handle = self.alloc_object();
         if self.graph_effects.configure_media(
             handle,
             archive.to_string(),
             resource.to_string(),
-            &bytes,
+            bytes,
         ) != 0
         {
             return None;
@@ -4704,6 +4900,7 @@ impl RuntimeTraceApi {
             .retain(|key, _| !is_composite(key));
         self.surface_text_states.remove(&surface);
         self.surface_text_buffers.remove(&surface);
+        self.message_pages.remove(&surface);
         // Text drawn into the window (Graph92:91 runs) goes with it, as in
         // the target, where it is part of the window's bitmap. Its text node
         // is keyed by the handle, so leaving it also kept the slot reserved
@@ -4712,6 +4909,10 @@ impl RuntimeTraceApi {
         // window layouts, and after 16 such switches GraphCreateWindowObject
         // returned 0.
         self.clear_bitmap_text(surface);
+        // So does its caret (child sprite 0).
+        if self.message_caret.is_some_and(|caret| caret.window == surface) {
+            self.message_caret = None;
+        }
         self.graph_object_layers.remove(&surface);
         self.graph_object_enabled.remove(&surface);
         self.graph_object_draw_enabled.remove(&surface);
@@ -7904,6 +8105,7 @@ impl RuntimeTraceApi {
         // display objects. Real graph layers remain authoritative.
         self.push_title_compatibility_items(&mut items);
         self.push_surface_draw_items(&mut items);
+        self.push_message_caret_draw_item(&mut items);
         let mut inactive_backgrounds = BTreeSet::new();
         let mut backf_secondaries = Vec::new();
         for (layer_id, layer) in &self.graph_layers {
@@ -9278,7 +9480,13 @@ struct RuntimeFrameReport {
     last_report: Option<ethornell_vm::VmRunReport>,
     total_steps: usize,
     scheduler_passes: usize,
+    /// Threads that ended their slice with Sys80:5F in the last pass.
+    yields: usize,
 }
+
+/// Scheduler passes a frame may add for threads that yielded: about the
+/// iterations the target's main loop runs in one 60 Hz frame period.
+const MAX_EXTRA_SCHEDULER_PASSES_PER_FRAME: usize = 15;
 
 #[derive(Clone)]
 struct CachedGraphTexture {
@@ -9295,20 +9503,12 @@ impl RuntimeEngine {
         trace: bool,
         fail_on_stub: bool,
         native_dialog_presentation: bool,
+        encoding: &'static encoding_rs::Encoding,
     ) -> Self {
         let program = ethornell_script::parse_bp_program(Some(script.to_string()), bytes);
         let mut vm = ethornell_vm::Vm::new();
         vm.set_native_abi_profile(confirmed_native_profile(&manager, bytes));
-        if let Ok(label) = std::env::var("ETHORNELL_TEXT_ENCODING") {
-            match label.trim().to_ascii_lowercase().as_str() {
-                "gbk" | "cp936" | "windows-936" => {
-                    vm.set_graph_text_encoding(encoding_rs::GBK);
-                    tracing::info!(encoding = "GBK", "game display text encoding configured");
-                }
-                "shift_jis" | "shift-jis" | "sjis" | "cp932" => {}
-                _ => tracing::warn!(%label, "unsupported ETHORNELL_TEXT_ENCODING; using Shift-JIS"),
-            }
-        }
+        vm.set_graph_text_encoding(encoding);
         vm.start(&program);
         Self {
             vm,
@@ -9367,6 +9567,7 @@ impl RuntimeEngine {
             self.options.trace,
             self.options.fail_on_stub,
             self.api.native_dialog_presentation,
+            self.vm.graph_text_encoding(),
         );
         if self.api.host_realtime_clock {
             engine.use_host_clock();
@@ -9425,7 +9626,11 @@ impl RuntimeEngine {
         elapsed_ms: u64,
     ) -> RuntimeFrameReport {
         self.begin_native_pass(elapsed_ms);
+        self.run_scheduler_pass()
+    }
 
+    /// One `sub_48CD70` pass over the thread list at the current time.
+    fn run_scheduler_pass(&mut self) -> RuntimeFrameReport {
         // `sub_48CD70` handles native status 3 by selecting the requested
         // CThread immediately in the same scheduler pass. Re-enter `run_loaded`
         // without advancing native time so a root-thread SwitchThread does not
@@ -9434,6 +9639,7 @@ impl RuntimeEngine {
         let mut report = self.tick_vm();
         let mut total_steps = report.steps;
         let mut scheduler_passes = 1usize;
+        let mut yields = self.vm.yields_in_last_pass();
         const MAX_ROOT_SWITCH_HOPS_PER_TICK: usize = 256;
         while report.stop_reason == ethornell_vm::VmStopReason::SwitchedThread
             && scheduler_passes < MAX_ROOT_SWITCH_HOPS_PER_TICK
@@ -9441,6 +9647,7 @@ impl RuntimeEngine {
             report = self.tick_vm();
             total_steps = total_steps.saturating_add(report.steps);
             scheduler_passes = scheduler_passes.saturating_add(1);
+            yields += self.vm.yields_in_last_pass();
         }
         if scheduler_passes == MAX_ROOT_SWITCH_HOPS_PER_TICK
             && report.stop_reason == ethornell_vm::VmStopReason::SwitchedThread
@@ -9463,6 +9670,7 @@ impl RuntimeEngine {
             last_report: Some(report),
             total_steps,
             scheduler_passes,
+            yields,
         }
     }
 
@@ -9481,12 +9689,44 @@ impl RuntimeEngine {
                 last_report: self.last_report.clone(),
                 total_steps: 0,
                 scheduler_passes: 0,
+                yields: 0,
             };
         }
 
-        let report = self.run_native_pass(pacing, elapsed_ms);
+        let mut changes = self.api.display_changes;
+        let mut report = self.run_native_pass(pacing, elapsed_ms);
         // Input edges are visible for one cooperative main-loop pass.
         self.api.finish_native_tick_input();
+        // The target's main loop (sub_48C990) runs a sub_48CD70
+        // scheduler pass per iteration and waits only about a millisecond
+        // between iterations (sub_493AE0 -> sub_4527C0), while a frame is
+        // presented at most once per frame period, when a redraw was
+        // requested (sub_461BA0). A thread that yields with Sys80:5F therefore
+        // runs again long before the screen shows what it left between two
+        // steps: Wonderful Everyday's message button bar releases its icon
+        // processor, yields and builds the next one, and the original never
+        // shows the bar empty; its system menu rebuilds its buttons, yields
+        // and releases them with the menu when it closes, and the original
+        // never shows them again. A pass costs too much to run as many as the
+        // target does, and threads that poll yield on every pass, so a frame
+        // runs another pass at its time only while the last one created or
+        // released a display object and a thread yielded: what such a thread
+        // does next is on screen with the frame, as in the target.
+        let mut extra_passes = 0;
+        while report.yields > 0
+            && self.api.display_changes != changes
+            && extra_passes < MAX_EXTRA_SCHEDULER_PASSES_PER_FRAME
+        {
+            changes = self.api.display_changes;
+            let pass = self.run_scheduler_pass();
+            report.total_steps = report.total_steps.saturating_add(pass.total_steps);
+            report.scheduler_passes = report
+                .scheduler_passes
+                .saturating_add(pass.scheduler_passes);
+            report.yields = pass.yields;
+            report.last_report = pass.last_report;
+            extra_passes += 1;
+        }
         self.api.sync_display_tree_from_runtime();
         self.api.refresh_aux_masked_sprites();
         self.api.refresh_native_sprite_filters();
@@ -9785,7 +10025,7 @@ fn native_bitmap_clear_color(color: i32) -> [u8; 4] {
 
 #[cfg(test)]
 mod directshow_movie_tests {
-    use super::{DecodedImage, RuntimeTraceApi, graph_effect, snapshot};
+    use super::{DecodedImage, MovieBytes, RuntimeTraceApi, graph_effect, snapshot};
 
     /// A minimal MPEG-1 program stream: one video packet (a sequence header).
     fn tiny_movie() -> Vec<u8> {
@@ -9811,8 +10051,12 @@ mod directshow_movie_tests {
         // at the size the script asked for.
         let handle = api.alloc_object();
         assert_eq!(
-            api.graph_effects
-                .configure_media(handle, String::new(), "m".into(), &tiny_movie()),
+            api.graph_effects.configure_media(
+                handle,
+                String::new(),
+                "m".into(),
+                MovieBytes::from_vec(tiny_movie()),
+            ),
             0
         );
         assert_eq!(api.graph_effects.invoke(handle).status, 0);
@@ -9988,18 +10232,19 @@ mod input_tests {
     };
 
     fn game_id_instruction(
-        opcode_name: &str,
+        opcode_name: &'static str,
         known_call: Option<&'static str>,
         operands: Vec<BpOperand>,
     ) -> BpInstruction {
         BpInstruction {
             offset: 0,
-            opcode: BpOpcode::Unknown(0),
-            opcode_hex: String::new(),
-            opcode_name: opcode_name.into(),
-            operands,
+            opcode: BpOpcode::Known {
+                code: 0,
+                name: opcode_name,
+            },
+            operands: operands.into(),
             known_call,
-            raw: Vec::new(),
+            raw: Vec::new().into(),
             warning: None,
         }
     }
@@ -10008,8 +10253,8 @@ mod input_tests {
     fn game_id_is_detected_from_bootstrap_comparison() {
         let program = BpProgram {
             script_name: Some("system.arc:ipl._bp".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 game_id_instruction("push_string", None, vec![BpOperand::String("decoy".into())]),
                 game_id_instruction("sys1", Some("GetGameId"), Vec::new()),
@@ -10031,6 +10276,130 @@ mod input_tests {
             detect_game_id_from_bootstrap(&program).as_deref(),
             Some("AmairoChocolate")
         );
+    }
+
+    #[test]
+    fn a_thread_that_yields_after_a_release_runs_again_before_the_frame_is_shown() {
+        // Release, Sys80:5F, rebuild: the shape of Wonderful Everyday's
+        // button bar between two lines. The rebuild belongs to the same
+        // frame; a thread that only polls and yields does not get more passes.
+        let instruction = |offset: u64, name: &'static str, raw: Vec<u8>, operands: Vec<BpOperand>| BpInstruction {
+            offset,
+            opcode: BpOpcode::Known { code: raw[0], name },
+            operands: operands.into_boxed_slice(),
+            known_call: None,
+            raw: raw.into(),
+            warning: None,
+        };
+        let run = |release: bool| {
+            let manager =
+                ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let mut api = super::RuntimeTraceApi::new(manager);
+            let window = api.alloc_window_surface(320, 96).unwrap();
+            let mut instructions = Vec::new();
+            if release {
+                instructions.push(instruction(
+                    0x10,
+                    "push_dword",
+                    [vec![0x02], (window as u32).to_le_bytes().to_vec()].concat(),
+                    vec![BpOperand::U32(window as u32)],
+                ));
+                instructions.push(instruction(0x15, "grp1", vec![0x90, 0x81], Vec::new()));
+            }
+            instructions.push(instruction(0x17, "sys1", vec![0x80, 0x5F], Vec::new()));
+            instructions.push(instruction(
+                0x19,
+                "push_byte",
+                vec![0x00, 2],
+                vec![BpOperand::U8(2)],
+            ));
+            let program = BpProgram {
+                script_name: Some("yield-within-a-frame".into()),
+                functions: Vec::new().into(),
+                strings: Vec::new().into(),
+                instructions: std::sync::Arc::new(instructions),
+                labels: std::sync::Arc::new(std::collections::HashMap::new()),
+                warnings: Vec::new(),
+                module_size: 0,
+                code: std::sync::Arc::new(Vec::new()),
+            };
+            let mut vm = ethornell_vm::Vm::new();
+            vm.start(&program);
+            let mut runtime = super::RuntimeEngine {
+                vm,
+                api,
+                options: ethornell_vm::VmRunOptions::default(),
+                last_report: None,
+            };
+            let report = runtime.run_frame(super::RuntimeFramePacing, 16, 16);
+            assert_eq!(runtime.api.engine_time_ms, 16);
+            (
+                report.scheduler_passes,
+                report.last_report.unwrap().stop_reason,
+            )
+        };
+
+        assert_eq!(run(true), (2, ethornell_vm::VmStopReason::Completed));
+        assert_eq!(run(false), (1, ethornell_vm::VmStopReason::Yielded));
+    }
+
+    #[test]
+    fn a_thread_that_yields_after_building_a_display_object_runs_again_before_the_frame_is_shown() {
+        // Build, Sys80:5F, release: the shape of Wonderful Everyday's system
+        // menu closing for the return to the title (it builds its icon
+        // processor again, yields, then releases it with its window). The
+        // release belongs to the same frame, so the rebuilt buttons are never
+        // on screen.
+        let instruction = |offset: u64, name: &'static str, raw: Vec<u8>, operands: Vec<BpOperand>| BpInstruction {
+            offset,
+            opcode: BpOpcode::Known { code: raw[0], name },
+            operands: operands.into_boxed_slice(),
+            known_call: None,
+            raw: raw.into(),
+            warning: None,
+        };
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = api.alloc_window_surface(388, 800).unwrap();
+        let program = BpProgram {
+            script_name: Some("build-yield-release".into()),
+            functions: Vec::new().into(),
+            strings: Vec::new().into(),
+            instructions: std::sync::Arc::new(vec![
+                instruction(
+                    0x10,
+                    "push_dword",
+                    [vec![0x02], (window as u32).to_le_bytes().to_vec()].concat(),
+                    vec![BpOperand::U32(window as u32)],
+                ),
+                instruction(0x15, "grp2", vec![0x91, 0xB8], Vec::new()),
+                instruction(0x17, "sys1", vec![0x80, 0x5F], Vec::new()),
+                instruction(0x19, "grp1", vec![0x90, 0xB9], Vec::new()),
+                instruction(0x1B, "push_byte", vec![0x00, 2], vec![BpOperand::U8(2)]),
+            ]),
+            labels: std::sync::Arc::new(std::collections::HashMap::new()),
+            warnings: Vec::new(),
+            module_size: 0,
+            code: std::sync::Arc::new(Vec::new()),
+        };
+        let mut vm = ethornell_vm::Vm::new();
+        vm.start(&program);
+        let mut runtime = super::RuntimeEngine {
+            vm,
+            api,
+            options: ethornell_vm::VmRunOptions::default(),
+            last_report: None,
+        };
+        let report = runtime.run_frame(super::RuntimeFramePacing, 16, 16);
+
+        assert_eq!(runtime.api.engine_time_ms, 16);
+        assert_eq!(report.scheduler_passes, 2);
+        assert_eq!(
+            report.last_report.unwrap().stop_reason,
+            ethornell_vm::VmStopReason::Completed
+        );
+        assert!(runtime.api.graph_input_objects.is_empty());
     }
 
     fn test_call_frame(
@@ -10679,6 +11048,137 @@ mod input_tests {
     }
 
     #[test]
+    fn a_message_waiting_at_its_end_blinks_the_caret_after_its_text() {
+        // sub_433F40: frame 0 at the text cursor, the next frame every
+        // Graph90:99 delay, a -1 frame hides the sprite, hidden at the end.
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = api.alloc_window_surface(320, 96).unwrap();
+        api.set_graph_object_draw_enabled(window, true);
+        let state = api.surface_text_states.entry(window).or_default();
+        state.cursor_x = 12;
+        state.cursor_y = 7;
+        state.font_size = 20;
+        api.native_message_surface_target = Some(window);
+        let caret = 3000;
+        api.store_runtime_bitmap(
+            caret,
+            DecodedImage {
+                width: 10,
+                height: 20,
+                rgba: vec![255; 10 * 20 * 4],
+            },
+            2,
+        );
+        GraphApi::configure_message_caret_frames(&mut api, 0x1234, 2, &[caret, -1]).unwrap();
+        api.graph_defaults.caret_frame_delay_ms = 500;
+        let caret_at = |api: &super::RuntimeTraceApi| {
+            api.graph_draw_items()
+                .into_iter()
+                .filter(|item| item.key == format!("runtime:bitmap:{caret}"))
+                .map(|item| (item.x, item.y))
+                .collect::<Vec<_>>()
+        };
+
+        api.start_native_message("ab\ncd e".to_string(), Some(window));
+        GraphApi::reveal_native_message(&mut api);
+        assert!(caret_at(&api).is_empty());
+        let (window_x, window_y) = api.surface_world_position(window);
+        let node = api
+            .text_nodes
+            .values()
+            .find(|node| node.target_surface == Some(window))
+            .unwrap();
+        let layout = api.formatted_text_layout(node);
+        // Second line, after four half-width glyphs of 10 px.
+        let end = (
+            window_x + 12.0 + 40.0,
+            window_y + 7.0 + layout.body_y_offset + layout.line_height,
+        );
+        GraphApi::tick_native_message_caret(&mut api, 1000);
+        assert_eq!(caret_at(&api), [end]);
+        GraphApi::tick_native_message_caret(&mut api, 1499);
+        assert_eq!(caret_at(&api), [end]);
+        GraphApi::tick_native_message_caret(&mut api, 1500);
+        assert!(caret_at(&api).is_empty());
+        GraphApi::tick_native_message_caret(&mut api, 2000);
+        assert_eq!(caret_at(&api), [end]);
+        GraphApi::finish_native_message(&mut api);
+        assert!(caret_at(&api).is_empty());
+
+        // sub_42C680/sub_42C600: a caret that doesn't fit before the valid
+        // rectangle's right edge goes to the start of the next line.
+        api.graph_surfaces.get_mut(&window).unwrap().valid_right = 12 + 40 + 5 - 1;
+        // From the same cursor: a message continues its window's text.
+        call_graph(
+            &mut api,
+            0x91,
+            0x8c,
+            &mut vec![Value::Int(window), Value::Int(12), Value::Int(7)],
+        )
+        .unwrap();
+        api.start_native_message("ab\ncd e".to_string(), Some(window));
+        GraphApi::reveal_native_message(&mut api);
+        GraphApi::tick_native_message_caret(&mut api, 3000);
+        assert_eq!(
+            caret_at(&api),
+            [(window_x + 12.0, end.1 + layout.line_height)]
+        );
+        // A new message, or the window's release, takes the caret away:
+        // window handles are reused slots.
+        api.start_native_message("ab".to_string(), Some(window));
+        assert!(caret_at(&api).is_empty());
+        GraphApi::reveal_native_message(&mut api);
+        GraphApi::tick_native_message_caret(&mut api, 4000);
+        assert_eq!(caret_at(&api).len(), 1);
+        assert!(api.remove_graph_surface(window));
+        assert!(api.message_caret.is_none());
+    }
+
+    #[test]
+    fn the_caret_is_drawn_after_its_windows_own_item() {
+        // Every item sorts with its owner's native key, so the caret, owned
+        // by the message window, follows the window's buffer (and not the
+        // other way round).
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = api.alloc_window_surface(320, 96).unwrap();
+        api.set_graph_object_draw_enabled(window, true);
+        api.graph_config.window_buffer = (1, 0);
+        let (buffer, caret) = (3001, 3000);
+        for id in [buffer, caret] {
+            api.store_runtime_bitmap(
+                id,
+                DecodedImage {
+                    width: 10,
+                    height: 20,
+                    rgba: vec![255; 10 * 20 * 4],
+                },
+                2,
+            );
+        }
+        api.graph_surfaces.get_mut(&window).unwrap().resource_id = Some(buffer);
+        api.surface_text_states.entry(window).or_default().font_size = 20;
+        api.native_message_surface_target = Some(window);
+        GraphApi::configure_message_caret_frames(&mut api, 0x1234, 2, &[caret, -1]).unwrap();
+        api.graph_defaults.caret_frame_delay_ms = 500;
+        api.start_native_message("ab".to_string(), Some(window));
+        GraphApi::reveal_native_message(&mut api);
+        GraphApi::tick_native_message_caret(&mut api, 1000);
+
+        let items = api.graph_draw_items();
+        let at = |id: i32| {
+            items
+                .iter()
+                .position(|item| item.key == format!("runtime:bitmap:{id}"))
+        };
+        assert!(at(caret).is_some() && at(buffer).is_some());
+        assert!(at(buffer) < at(caret));
+    }
+
+    #[test]
     fn input_class_poll_and_direct_poll_share_one_consumption_token() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -11089,6 +11589,45 @@ mod input_tests {
     }
 
     #[test]
+    fn native_filter_reuses_pixels_and_invalidates_on_parameter_change() {
+        let manager = ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        api.screen_width = 8;
+        api.screen_height = 8;
+        let Value::Int(filter) = call_graph(&mut api, 0x90, 0x60, &mut Vec::new()).unwrap() else { panic!() };
+        api.configure_native_filter(0x65, &[filter, 0xff0000, 128, 0]).unwrap();
+        let key = format!("runtime:filter:{filter}");
+        let first = api.graph_images[&key].clone();
+        let revision = api.graph_image_revision(&key);
+        api.refresh_native_filters();
+        assert_eq!(api.graph_image_revision(&key), revision);
+        // A forced reconstruction must produce exactly the cached pixels.
+        api.native_filter_cache = None;
+        api.refresh_native_filters();
+        assert_eq!(api.graph_images[&key], first);
+        let revision = api.graph_image_revision(&key);
+        api.graph90_set_common_state(filter, None, None, Some(64), None);
+        api.refresh_native_filters();
+        assert_ne!(api.graph_image_revision(&key), revision);
+        assert_ne!(api.graph_images[&key], first);
+        api.store_runtime_bitmap(13, DecodedImage {
+            width: 8, height: 8, rgba: vec![0; 8 * 8 * 4],
+        }, 3);
+        api.configure_native_filter(0x66, &[filter, 0, 0xff0000, 13, 0, 128, 0]).unwrap();
+        let revision = api.graph_image_revision(&key);
+        let mask_key = api.graph_resources[&13].key.clone();
+        let mut mask = api.graph_images[&mask_key].clone();
+        mask.rgba.fill(255);
+        api.store_graph_image(mask_key, mask);
+        api.refresh_native_filters();
+        assert_ne!(api.graph_image_revision(&key), revision);
+        let cached = api.graph_images[&key].clone();
+        api.native_filter_cache = None;
+        api.refresh_native_filters();
+        assert_eq!(api.graph_images[&key], cached);
+    }
+
+    #[test]
     fn native_filter_release_removes_owned_state() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -11135,6 +11674,10 @@ mod input_tests {
         call_graph(&mut api, 0x91, 0x88, &mut font).unwrap();
         let mut text_property = vec![Value::Int(0x8000_0000_u32 as i32), Value::Int(1)];
         call_graph(&mut api, 0x91, 0x9a, &mut text_property).unwrap();
+        // Wonderful Everyday's boot script sets 0x80000004: ignored.
+        let mut unknown_property = vec![Value::Int(0x8000_0004_u32 as i32), Value::Int(1)];
+        call_graph(&mut api, 0x91, 0x9a, &mut unknown_property).unwrap();
+        assert!(!api.graph_config.text_global_properties.contains_key(&0x8000_0004));
 
         assert!(api.graph_surfaces[&surface].isolated_group);
         assert_eq!(api.graph_surfaces[&surface].line_spacing_percent, 50);
@@ -11151,11 +11694,6 @@ mod input_tests {
         let mut option = vec![Value::Int(7), Value::Int(1)];
         assert!(matches!(call_graph(&mut api, 0x91, 0x0a, &mut option), Ok(Value::Int(0))));
         assert!(option.is_empty());
-        let mut later_property = vec![Value::Int(0x8000_0004_u32 as i32), Value::Int(0)];
-        call_graph(&mut api, 0x91, 0x9a, &mut later_property).unwrap();
-        assert_eq!(api.graph_config.text_global_properties[&0x8000_0004], 0);
-        let mut unknown = vec![Value::Int(0x8000_0010_u32 as i32), Value::Int(0)];
-        assert!(call_graph(&mut api, 0x91, 0x9a, &mut unknown).is_err());
 
         // sub_42C870 refuses more than 800 and sub_484CD0 raises it.
         let mut invalid = vec![Value::Int(surface), Value::Int(801)];
@@ -11601,6 +12139,8 @@ mod input_tests {
         assert_eq!(api.graph_frame_interval_ms, 16);
         let mut invalid_frame_rate = vec![Value::Int(1001)];
         assert!(call_graph(&mut api, 0x90, 0x02, &mut invalid_frame_rate).is_err());
+        let mut negative_frame_rate = vec![Value::Int(-1)];
+        assert!(call_graph(&mut api, 0x90, 0x02, &mut negative_frame_rate).is_err());
 
         let mut memory_limit = vec![Value::Int(0x2000_0000)];
         call_graph(&mut api, 0x90, 0x03, &mut memory_limit).unwrap();
@@ -15918,6 +16458,56 @@ mod input_tests {
     }
 
     #[test]
+    fn graph92_91_text_is_drawn_at_its_window_priority() {
+        // Wonderful Everyday draws a skipped line at once with Graph92:91
+        // into its message window (handle 0xB0000000, priority 117).
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = 0xB000_0000_u32 as i32;
+        let mut surface = RuntimeSurface::display(window, 1128.0, 200.0);
+        surface.z = 117;
+        api.graph_surfaces.insert(window, surface);
+        // The window has its font from Graph91:88, which Graph92:91 checks.
+        api.surface_text_states.entry(window).or_default().font_size = 28;
+        let mut args = [window, 0, 0, 1, 0, 1, 2, 1, 1, 0xffffff, 192]
+            .map(Value::Int)
+            .to_vec();
+        args[1] = Value::Str("A skipped line".into());
+
+        call_graph(&mut api, 0x92, 0x91, &mut args).unwrap();
+
+        // The text joins the window's page, drawn by the message node.
+        let page = api.text_runtime.target_node.unwrap();
+        assert_eq!(api.text_nodes[&page].target_surface, Some(window));
+        assert_eq!(api.text_nodes[&page].z, 117);
+    }
+
+    #[test]
+    fn graph92_91_text_beside_another_windows_message_is_drawn_at_its_window_priority() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let other = 0xB000_0001_u32 as i32;
+        let mut surface = RuntimeSurface::display(other, 600.0, 100.0);
+        surface.z = 120;
+        api.graph_surfaces.insert(other, surface);
+        api.reset_window_text_cursor(other);
+
+        // The message node shows the first window's message, so the text
+        // drawn on the other window keeps a node of its own.
+        api.start_native_message("A message.".into(), Some(window));
+        api.tick_text(10_000);
+        draw_at_once(&mut api, other, "Other text.");
+
+        assert_eq!(api.text_nodes[&other].text, "Other text.");
+        // The window's priority, not its handle (0xB0000001 is negative as
+        // a priority and put the text under the whole scene).
+        assert_eq!(api.text_nodes[&other].z, 120);
+    }
+
+    #[test]
     fn graph92_91_draws_in_the_colour_and_style_it_is_given() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -15944,6 +16534,227 @@ mod input_tests {
                 concentration: 192,
             }))
         );
+    }
+
+    fn message_window(api: &mut super::RuntimeTraceApi) -> i32 {
+        let window = 0xB000_0000_u32 as i32;
+        api.graph_surfaces
+            .insert(window, RuntimeSurface::display(window, 1128.0, 200.0));
+        api.reset_window_text_cursor(window);
+        window
+    }
+
+    fn shown_message(api: &super::RuntimeTraceApi) -> String {
+        let node = api.text_runtime.target_node.unwrap();
+        api.text_nodes[&node].text.clone()
+    }
+
+    #[test]
+    fn a_message_continues_the_text_its_window_already_shows() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        // Wonderful Everyday extends a line in parts: messages that don't
+        // wait at their end, with neither 92:8E nor a page feed between.
+        api.start_native_message("Part one,".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Part one,");
+        let after_first = api.surface_text_states[&window];
+        assert_eq!(after_first.cursor_y, home.cursor_y);
+        assert!(after_first.cursor_x > home.cursor_x);
+
+        let first_layout = api.text_runtime.current_visible_text();
+        api.start_native_message(" part two.".into(), Some(window));
+        // The page keeps the window's whole width: the first part doesn't
+        // reflow.
+        assert!(api.text_runtime.current_visible_text().starts_with(&first_layout));
+        assert_eq!(
+            api.window_text_state(Some(window)).width,
+            1128.0 - api.surface_text_states[&window].cursor_x as f32
+        );
+        // The first part stays on screen while the second is typed out.
+        assert_eq!(shown_message(&api), "Part one,");
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Part one, part two.");
+        assert!(api.surface_text_states[&window].cursor_x > after_first.cursor_x);
+    }
+
+    #[test]
+    fn a_reset_or_a_page_feed_starts_a_new_page() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        api.start_native_message("First line.".into(), Some(window));
+        api.tick_text(10_000);
+        // scrmsg._bp ends a waited line with Graph90:90(window, "\x0c"):
+        // sub_433890 clears the window and sends the cursor home.
+        api.start_native_message("\x0c".into(), Some(window));
+        assert_eq!(shown_message(&api), "");
+        assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
+        api.start_native_message("Second line.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Second line.");
+
+        // A message after Graph91:8C starts at the new cursor.
+        call_graph(
+            &mut api,
+            0x91,
+            0x8c,
+            &mut vec![Value::Int(window), Value::Int(200), Value::Int(80)],
+        )
+        .unwrap();
+        api.start_native_message("Moved.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Moved.");
+        assert_eq!(api.window_text_state(Some(window)).y, 80.0);
+
+        // Graph92:8E (sub_440F80) clears the window too.
+        call_graph(&mut api, 0x92, 0x8e, &mut vec![Value::Int(window)]).unwrap();
+        api.start_native_message("Third line.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Third line.");
+    }
+
+    fn draw_at_once(api: &mut super::RuntimeTraceApi, window: i32, text: &str) {
+        // Wonderful Everyday's scrmsg._bp draws a skipped line at once with
+        // Graph92:91 (its text colour setting and edge style), in a window
+        // that has its font from Graph91:88, which Graph92:91 checks.
+        let state = api.surface_text_states.entry(window).or_default();
+        if state.font_size == 0 {
+            state.font_size = 26;
+        }
+        let mut args = [window, 0, 0, 1, 0, 1, 2, 1, 1, 0xffffff, 192]
+            .map(Value::Int)
+            .to_vec();
+        args[1] = Value::Str(text.into());
+        call_graph(api, 0x92, 0x91, &mut args).unwrap();
+    }
+
+    #[test]
+    fn a_page_feed_clears_the_text_graph92_91_drew_on_the_window() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        // When skipping has stopped by the time a skipped line is done,
+        // scrmsg._bp ends its page with Graph90:90(window, "\x0c") rather
+        // than Graph92:8E.
+        draw_at_once(&mut api, window, "A skipped line.");
+        assert_eq!(shown_message(&api), "A skipped line.");
+
+        // sub_433890 clears the window's text bitmap (sub_42B9B0), where
+        // Graph92:91 drew too, so the next line doesn't show over it.
+        api.start_native_message("\x0c".into(), Some(window));
+        assert_eq!(shown_message(&api), "");
+        assert!(!api.text_nodes.contains_key(&window));
+        assert_eq!(api.surface_text_buffers[&window], "");
+        assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
+        api.start_native_message("The next line.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "The next line.");
+    }
+
+    #[test]
+    fn graph92_91_draws_on_its_window_page_at_the_text_cursor() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        // sub_42B710 draws at the window's text cursor and leaves the cursor
+        // after the text (sub_42C700), as a message does.
+        draw_at_once(&mut api, window, "A skipped line.");
+        assert_eq!(shown_message(&api), "A skipped line.");
+        let after_line = api.surface_text_states[&window];
+        assert_eq!(after_line.cursor_y, home.cursor_y);
+        assert!(after_line.cursor_x > home.cursor_x);
+        assert!(!api.text_nodes.contains_key(&window));
+        assert_eq!(
+            api.text_nodes[&api.text_runtime.target_node.unwrap()].z,
+            api.graph_surfaces[&window].z
+        );
+
+        // On a page of several lines scrmsg._bp asks Graph91:8E whether the
+        // cursor is at a line's start and, when it isn't, draws a line feed
+        // with Graph92:91 before the next line.
+        let at_line_start = call_graph(&mut api, 0x91, 0x8e, &mut vec![Value::Int(window)]);
+        assert_eq!(at_line_start.unwrap(), Value::Int(0));
+        draw_at_once(&mut api, window, "\n");
+        let next_line = api.surface_text_states[&window];
+        assert_eq!(next_line.cursor_x, home.cursor_x);
+        assert!(next_line.cursor_y > home.cursor_y);
+
+        // The line typed after skipping stops goes on the next line; the
+        // skipped one stays above it.
+        api.start_native_message("The next line.".into(), Some(window));
+        assert_eq!(shown_message(&api), "A skipped line.\n");
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "A skipped line.\nThe next line.");
+
+        // Graph92:8E clears both.
+        call_graph(&mut api, 0x92, 0x8e, &mut vec![Value::Int(window)]).unwrap();
+        assert!(api
+            .text_nodes
+            .values()
+            .filter(|node| node.target_surface == Some(window))
+            .all(|node| node.text.is_empty()));
+        assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
+        assert_eq!(api.surface_text_states[&window].cursor_y, home.cursor_y);
+    }
+
+    #[test]
+    fn graph92_91_from_a_cursor_in_mid_line_keeps_all_its_glyphs() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = 0xB000_0000_u32 as i32;
+        api.graph_surfaces
+            .insert(window, RuntimeSurface::display(window, 1128.0, 400.0));
+        api.reset_window_text_cursor(window);
+        let without_spaces =
+            |text: &str| text.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+
+        // A skipped line extended in parts: the second part starts where
+        // the first one ends, near the right edge, goes on to the edge and
+        // wraps to the left edge (sub_435290 has no line limit).
+        let first = "Part one. ".repeat(7);
+        let second = "and then the rest of the line, ".repeat(12);
+        draw_at_once(&mut api, window, &first);
+        assert!(api.surface_text_states[&window].cursor_x > 600);
+        draw_at_once(&mut api, window, &second);
+
+        let both = without_spaces(&format!("{first}{second}"));
+        assert_eq!(without_spaces(&shown_message(&api)), both);
+        assert_eq!(without_spaces(&api.surface_text_buffers[&window]), both);
+    }
+
+    #[test]
+    fn graph92_91_leaves_another_windows_message_where_it_is() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let other = 0xB000_0001_u32 as i32;
+        api.graph_surfaces
+            .insert(other, RuntimeSurface::display(other, 600.0, 100.0));
+        api.reset_window_text_cursor(other);
+
+        // The engine keeps one message node: text drawn on another window
+        // while it shows a message stays a node of that window.
+        api.start_native_message("A message.".into(), Some(window));
+        api.tick_text(10_000);
+        draw_at_once(&mut api, other, "Other text.");
+        assert_eq!(shown_message(&api), "A message.");
+        assert_eq!(api.text_nodes[&other].text, "Other text.");
     }
 
     #[test]
@@ -16684,13 +17495,147 @@ mod input_tests {
             (118.0, 58.0, 1045.0, 129.0)
         );
         assert_eq!(state.font_size, 28.0);
-        assert!((state.line_height - 37.52).abs() < 0.001);
+        // 28 + 28 * 34 / 100 in integers (sub_42C4C0).
+        assert_eq!(state.line_height, 37.0);
         assert_eq!(api.surface_text_states[&window].font, 7);
         api.start_native_message("字幕".into(), Some(window));
         api.tick_text(1000);
         let target = api.text_runtime.target_node.unwrap();
+        // Byte 0x0C is CProcDspMsg's page feed (vtable+40, sub_433890): it
+        // clears the window and sends the cursor home.
         assert_eq!(api.start_native_message("\x0c".into(), Some(window)), 0);
-        assert_eq!(api.text_nodes[&target].text, "字幕");
+        assert_eq!(api.text_nodes[&target].text, "");
+        assert_eq!(
+            (
+                api.surface_text_states[&window].cursor_x,
+                api.surface_text_states[&window].cursor_y
+            ),
+            (118, 58)
+        );
+    }
+
+    #[test]
+    fn a_program_hands_graph92_1b_exactly_its_three_arguments() {
+        // logwnd._bp calls 92:1B(B, X, 1) once per entry; through the VM the
+        // call must receive all three arguments (it was a stub without an
+        // arity, which got none).
+        let instruction = |offset: u64, name: &'static str, raw: Vec<u8>, operands: Vec<BpOperand>| BpInstruction {
+            offset,
+            opcode: BpOpcode::Known { code: raw[0], name },
+            operands: operands.into_boxed_slice(),
+            known_call: None,
+            raw: raw.into(),
+            warning: None,
+        };
+        let push = |offset: u64, value: u32| {
+            instruction(
+                offset,
+                "push_dword",
+                [vec![0x02], value.to_le_bytes().to_vec()].concat(),
+                vec![BpOperand::U32(value)],
+            )
+        };
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let (text, halo) = (1429, 1431);
+        let mut glyph = DecodedImage {
+            width: 5,
+            height: 5,
+            rgba: vec![0; 5 * 5 * 4],
+        };
+        glyph.rgba[(2 * 5 + 2) * 4..][..4].copy_from_slice(&[0, 0, 0, 255]);
+        api.store_runtime_bitmap(text, glyph, 2);
+        let program = BpProgram {
+            script_name: Some("outline-halo".into()),
+            functions: Vec::new().into(),
+            strings: Vec::new().into(),
+            instructions: std::sync::Arc::new(vec![
+                push(0x10, halo as u32),
+                push(0x15, text as u32),
+                push(0x1A, 1),
+                instruction(0x1F, "grp3", vec![0x92, 0x1B], Vec::new()),
+                instruction(0x21, "push_byte", vec![0x00, 2], vec![BpOperand::U8(2)]),
+            ]),
+            labels: std::sync::Arc::new(std::collections::HashMap::new()),
+            warnings: Vec::new(),
+            module_size: 0,
+            code: std::sync::Arc::new(Vec::new()),
+        };
+        let mut vm = ethornell_vm::Vm::new();
+        vm.start(&program);
+        let mut runtime = super::RuntimeEngine {
+            vm,
+            api,
+            options: ethornell_vm::VmRunOptions::default(),
+            last_report: None,
+        };
+        runtime.run_frame(super::RuntimeFramePacing, 16, 16);
+
+        let image = runtime.api.graph_bitmap_image(halo).unwrap();
+        assert_eq!((image.width, image.height), (21, 21));
+        assert_eq!(image.rgba[(9 * 21 + 10) * 4..][..4], [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn graph92_1b_outlines_log_text_in_white_around_its_glyphs() {
+        // logwnd._bp: 92:1B(B, X, 1), then B blended over X at (-8, -8) with
+        // transparency 64 (90:18 mode 1). The stub drew nothing.
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let (text, halo) = (1429, 1431);
+        let mut glyph = DecodedImage {
+            width: 5,
+            height: 5,
+            rgba: vec![0; 5 * 5 * 4],
+        };
+        glyph.rgba[(2 * 5 + 2) * 4..][..4].copy_from_slice(&[0, 0, 0, 255]);
+        api.store_runtime_bitmap(text, glyph.clone(), 2);
+        let mut stack = vec![Value::Int(halo), Value::Int(text), Value::Int(1)];
+        call_graph(&mut api, 0x92, 0x1b, &mut stack).unwrap();
+        assert!(stack.is_empty());
+        let image = api.graph_bitmap_image(halo).unwrap();
+        assert_eq!((image.width, image.height), (21, 21));
+        let pixel = |x: u32, y: u32| image.rgba[((y * 21 + x) * 4) as usize..][..4].to_vec();
+        // The glyph itself is not covered; a one-pixel ring around it is.
+        assert_eq!(pixel(10, 10)[3], 0);
+        for (x, y) in [(9, 9), (10, 9), (11, 10), (11, 11)] {
+            assert_eq!(pixel(x, y), [255, 255, 255, 255]);
+        }
+        assert_eq!(pixel(8, 10)[3], 0);
+
+        // The script then copies B into a cleared bitmap of its size with
+        // 91:1D type 0 (sub_40AF50, a plain copy: the halo stays white)
+        // and blends that over the text.
+        let copy = 1432;
+        api.store_runtime_bitmap(
+            copy,
+            DecodedImage {
+                width: 21,
+                height: 21,
+                rgba: vec![0; 21 * 21 * 4],
+            },
+            2,
+        );
+        let mut stack = vec![
+            Value::Int(copy),
+            Value::Int(halo),
+            Value::Int(0),
+            Value::Int(0xFF_FFFF),
+            Value::Int(0),
+        ];
+        call_graph(&mut api, 0x91, 0x1d, &mut stack).unwrap();
+        let copied = api.graph_bitmap_image(copy).unwrap();
+        assert_eq!(copied.rgba, image.rgba);
+        let mut composed = glyph;
+        assert!(crate::bitmap_blend::blit_alpha_over_parameter(
+            &mut composed, 2, &copied, 2, -8, -8, 64
+        ));
+        let at = |x: usize, y: usize| composed.rgba[(y * 5 + x) * 4..][..4].to_vec();
+        assert_eq!(at(2, 2), [0, 0, 0, 255]);
+        assert_eq!(at(3, 2), [255, 255, 255, 191]);
+        assert_eq!(at(4, 2)[3], 0);
     }
 
     #[test]
@@ -19747,19 +20692,17 @@ fn empty_bp_program(name: String) -> ethornell_script::BpProgram {
     labels.insert(0x10, 0);
     ethornell_script::BpProgram {
         script_name: Some(name),
-        functions: Vec::new(),
-        strings: Vec::new(),
+        functions: std::sync::Arc::new(Vec::new()),
+        strings: std::sync::Arc::new(Vec::new()),
         instructions: std::sync::Arc::new(vec![ethornell_script::BpInstruction {
             offset: 0x10,
             opcode: ethornell_script::BpOpcode::Known {
                 code: 0x17,
                 name: "ret",
             },
-            opcode_hex: "0x17".into(),
-            opcode_name: "ret".into(),
-            operands: Vec::new(),
+            operands: Vec::new().into(),
             known_call: None,
-            raw: vec![0x17],
+            raw: vec![0x17].into(),
             warning: Some("generated empty program after runtime load failure".into()),
         }]),
         labels: std::sync::Arc::new(labels),
@@ -23623,6 +24566,11 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
 
     fn finish_native_message(&mut self) {
         self.native_message_active = false;
+        self.message_caret = None;
+    }
+
+    fn tick_native_message_caret(&mut self, now_tick: u32) {
+        self.tick_message_caret(now_tick);
     }
 
     fn register_graph_color_lut(&mut self, id: i32, points: [[i32; 2]; 3]) -> bool {
@@ -25009,6 +25957,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                         "無効なウィンドウ幅 [ {width} , {height} ] が指定されました"
                     )));
                 };
+                self.display_changes += 1;
                 return Ok(ethornell_vm::Value::Int(handle));
             }
             (0x90, 0x81) => {
@@ -25045,6 +25994,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 if !exists || !self.remove_graph_surface(window) {
                     return fail("is not a window object");
                 }
+                self.display_changes += 1;
                 tracing::debug!(window, "GraphReleaseWindowObject");
                 trace_graph!(self, "release window #{window}");
             }
@@ -25841,6 +26791,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let object = self.alloc_input_processor_handle();
                 self.graph_input_objects
                     .insert(object, RuntimeGraphInputObject::new(layer));
+                self.display_changes += 1;
                 tracing::debug!(layer, object, "GraphCreateIconInputProcessor");
                 trace_graph!(
                     self,
@@ -25854,6 +26805,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let removed = self.graph_input_objects.remove(&object_id);
                 if removed.is_some() {
                     self.remove_graph_input_control_layers(object_id);
+                    self.display_changes += 1;
                 }
                 tracing::info!(?object, "GraphReleaseIconInputProcessor");
                 return Ok(ethornell_vm::Value::Int(i32::from(removed.is_some())));
@@ -26419,6 +27371,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                             native.enabled = 1;
                             native.draw_enabled = 0;
                         }
+                        self.display_changes += 1;
                     })
                     .unwrap_or_default();
                 if handle == 0 {
@@ -26448,6 +27401,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     self.graph_object_draw_enabled.remove(&handle);
                     self.graph_object_properties.remove(&handle);
                     self.display_tree.remove(handle);
+                    self.display_changes += 1;
                 }
                 tracing::info!(
                     handle,
@@ -26778,32 +27732,56 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     // sub_486500 and the message procedure both enter
                     // sub_42B710, so direct formatted draws must preserve the
                     // same ruby spans and kinsoku wrapping as 92:90.
-                    let parsed = text::parse_and_wrap_styled_message(text, &state);
-                    let x = state.x;
-                    let y = state.y;
-                    self.store_bitmap_text_run(
-                        target,
-                        RuntimeTextNode {
-                            text: parsed.text.clone(),
-                            enabled: true,
-                            owner_object: Some(target),
-                            screen_attached: false,
-                            target_surface: Some(target),
-                            x,
-                            y,
-                            size: state.font_size,
-                            line_height: state.line_height,
-                            formatted_layout: true,
-                            color: state.color,
-                            z: target,
-                            ruby_spans: parsed.ruby_spans,
-                            style_spans: parsed.style_spans,
-                        },
-                    );
-                    self.surface_text_buffers
-                        .entry(target)
-                        .or_default()
-                        .push_str(&parsed.text);
+                    if self.graph_surfaces.contains_key(&target)
+                        && self.message_text_node_is_free_for(target)
+                    {
+                        // Into the window's text bitmap, at its cursor, as
+                        // a message draws. It is laid out on the window's
+                        // page: from a cursor in mid-line it goes on to the
+                        // window's right edge and wraps to its left edge.
+                        let drawn = self.draw_window_text_at_once(target, text);
+                        self.surface_text_buffers
+                            .entry(target)
+                            .or_default()
+                            .push_str(&drawn);
+                    } else {
+                        let parsed = text::parse_and_wrap_styled_message(text, &state);
+                        self.surface_text_buffers
+                            .entry(target)
+                            .or_default()
+                            .push_str(&parsed.text);
+                        let x = state.x;
+                        let y = state.y;
+                        // The window composes this text into its own
+                        // surface, so it is drawn at the window's priority,
+                        // as a 92:90 message is. The handle is not a
+                        // priority: 0xB0000000 put the text under the whole
+                        // scene.
+                        let z = self
+                            .graph_surfaces
+                            .get(&target)
+                            .map(|surface| surface.z)
+                            .unwrap_or(target);
+                        self.store_bitmap_text_run(
+                            target,
+                            RuntimeTextNode {
+                                text: parsed.text.clone(),
+                                enabled: true,
+                                owner_object: Some(target),
+                                screen_attached: false,
+                                target_surface: Some(target),
+                                x,
+                                y,
+                                size: state.font_size,
+                                line_height: state.line_height,
+                                formatted_layout: true,
+                                color: state.color,
+                                z,
+                                ruby_spans: parsed.ruby_spans,
+                                style_spans: parsed.style_spans,
+                            },
+                        );
+                    }
                 }
                 tracing::debug!(
                     target,
@@ -26913,9 +27891,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // sub_486EB0 -> sub_441340: cursor reset, buffer clear.
                 let target = pop_int_value(stack).unwrap_or_default();
                 self.graph92_require_window(target)?;
-                self.reset_window_text_cursor(target);
-                self.clear_bitmap_text(target);
-                self.surface_text_buffers.insert(target, String::new());
+                self.clear_window_text(target);
                 if self.native_message_surface_target == Some(target) {
                     self.reset_native_message_text();
                 }
@@ -27356,32 +28332,71 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     4
                 } else if !(0..=128).contains(&volume) {
                     3
-                } else if let Some(bytes) = read_runtime_bytes(&self.manager, &archive, &resource) {
-                    let configured = self.graph_effects.configure_media(
-                        bitmap,
-                        archive.clone(),
-                        resource.clone(),
-                        &bytes,
-                    );
-                    if configured == 0 {
-                        let options = self
-                            .graph_effects
-                            .set_movie_options(bitmap, looping, volume);
-                        if options == 0 {
-                            self.graph_process_handles.insert(bitmap);
-                            // sub_45C1C0 -> sub_407D90: connecting the graph
-                            // creates the slot at the picture size, format 1,
-                            // cleared, so the script can bind it at once.
-                            if let Some((width, height)) = self.graph_effects.movie_size(bitmap) {
-                                self.recreate_native_bitmap(bitmap, width, height, 1);
-                            }
-                        }
-                        options
-                    } else {
-                        configured
-                    }
                 } else {
-                    2
+                    #[cfg(feature = "console")]
+                    {
+                        // Read every program stream into a buffer reserved
+                        // during startup.  Replacing a slot first releases
+                        // its previous decoder, so two full PES packet lists
+                        // cannot coexist on Vita's fragmented heap.
+                        self.sweep_unreferenced_archive_images();
+                        if self.graph_effects.is_movie(bitmap) {
+                            let _ = self.graph_effects.close_movie_slot(bitmap);
+                            self.graph_process_handles.remove(&bitmap);
+                        }
+                        let result = match find_runtime_resource(&self.manager, &archive, &resource)
+                        {
+                            Some(entry) => self
+                                .movie_read_buffer
+                                .load_decoded(&self.manager, &entry)
+                                .map(|bytes| {
+                                    self.graph_effects.configure_media(
+                                        bitmap,
+                                        archive.clone(),
+                                        resource.clone(),
+                                        bytes,
+                                    )
+                                })
+                                .unwrap_or(2),
+                            None => 2,
+                        };
+                        result
+                    }
+                    #[cfg(not(feature = "console"))]
+                    {
+                        read_runtime_bytes(&self.manager, &archive, &resource)
+                            .map(|bytes| {
+                                self.graph_effects.configure_media(
+                                    bitmap,
+                                    archive.clone(),
+                                    resource.clone(),
+                                    MovieBytes::from_vec(bytes),
+                                )
+                            })
+                            .unwrap_or(2)
+                    }
+                };
+                let status = if status == 0 {
+                    let options = self
+                        .graph_effects
+                        .set_movie_options(bitmap, looping, volume);
+                    if options == 0 {
+                        self.graph_process_handles.insert(bitmap);
+                        if let Some(frame) = self.graph_effects.prepare_initial_movie_frame(bitmap)
+                        {
+                            self.store_movie_frame(frame);
+                            // The target's initial bitmap descriptor is RGB
+                            // format 1 even though its first decoded sample
+                            // is stored as RGBA.
+                            self.bitmap_formats.insert(bitmap, 1);
+                        } else if let Some((width, height)) = self.graph_effects.movie_size(bitmap)
+                        {
+                            self.recreate_native_bitmap(bitmap, width, height, 1);
+                        }
+                    }
+                    options
+                } else {
+                    status
                 };
                 tracing::debug!(
                     bitmap,
@@ -29004,11 +30019,9 @@ mod selector_audit {
                 let instruction = BpInstruction {
                     offset: 0,
                     opcode: BpOpcode::Known { code: group, name },
-                    opcode_hex: format!("0x{group:02X}"),
-                    opcode_name: name.into(),
-                    operands: Vec::new(),
+                    operands: Vec::new().into(),
                     known_call: None,
-                    raw: vec![group, id as u8],
+                    raw: vec![group, id as u8].into(),
                     warning: None,
                 };
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

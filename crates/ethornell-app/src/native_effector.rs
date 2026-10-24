@@ -249,7 +249,7 @@ impl RuntimeTraceApi {
         source: &DecodedImage,
     ) -> Option<DecodedImage> {
         let state = self.graph91_effectors.get(&object)?.clone();
-        let raster = self.native_effector_rasters.get(&object)?.clone();
+        let raster = self.native_effector_rasters.get(&object)?;
         if raster.bindings.iter().any(|(bitmap, generation)| {
             self.graph_resources
                 .get(bitmap)

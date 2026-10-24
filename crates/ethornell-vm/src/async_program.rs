@@ -1,4 +1,5 @@
 use crate::MAIN_THREAD_ID;
+use crate::local_window::LocalWindow;
 use crate::{
     ADDRESS_MASK, GraphApi, HEAP_MEMORY_BASE, LOCAL_MEMORY_BASE, SoundApi, SysApi, Value, Vm,
     VmRunOptions, VmStopReason,
@@ -81,9 +82,9 @@ impl Vm {
 
         // The new thread gets the globals and heap when it first runs (see
         // `hand_over_memory`); until then it owns only its local region.
-        let mut vm = Vm::new();
-        vm.memory.truncate(HEAP_MEMORY_BASE);
-        vm.memory.shrink_to_fit();
+        // Global user data follows the active process buffer during handover;
+        // an idle thread must not keep another 1 MiB snapshot of it.
+        let mut vm = Vm::with_buffers(Vec::new(), Vec::new());
         vm.native_abi_profile = self.native_abi_profile;
         vm.graph_text_encoding = self.graph_text_encoding;
         vm.system80_shared = Arc::clone(&self.system80_shared);
@@ -100,7 +101,6 @@ impl Vm {
         vm.next_binary_or_bmv_async = self.next_binary_or_bmv_async;
         vm.exclusive_thread_id = self.exclusive_thread_id;
         vm.global_size = self.global_size;
-        vm.global_user_data = self.global_user_data.clone();
         vm.loaded_bcs_ranges = self.loaded_bcs_ranges.clone();
         vm.timing = self.timing.clone();
         vm.rng_seed = self.rng_seed;
@@ -111,7 +111,8 @@ impl Vm {
         vm.secondary_resource_root = self.secondary_resource_root.clone();
         vm.validated_file_root = self.validated_file_root.clone();
         vm.system_wait_state = self.system_wait_state;
-        vm.start(&program);
+        vm.start_execution(&program, false);
+        vm.parked_local = Some(LocalWindow::from_code(&program.code));
         let thread_id = thread_id.unwrap_or_else(|| {
             let thread_id = self.next_thread_id.max(1);
             self.next_thread_id = self.next_thread_id.saturating_add(1).max(1);
@@ -418,7 +419,8 @@ impl Vm {
             } else {
                 self.root_procedure_active
             };
-            let report = task.vm.run_loaded(api, &options);
+            let report = task.vm.run_loaded_internal(api, &options, false);
+            self.pass_yields += task.vm.pass_yields;
             if options.collect_diagnostics || report.stop_reason.is_fatal() {
                 self.async_reports.push(report.clone());
             }
@@ -637,10 +639,15 @@ fn hand_over_memory(source: &mut Vm, destination: &mut Vm) {
     if live.len() < HEAP_MEMORY_BASE {
         live.resize(HEAP_MEMORY_BASE, 0);
     }
+    let mut scratch = std::mem::take(&mut source.local_window_scratch);
     let mut window = take_local_window(destination);
-    live[local].swap_with_slice(&mut window);
+    let bounds = live.local_bounds();
+    let incoming_bounds = window.prefix_lengths();
+    window.exchange_bounded(&mut live[local], &mut scratch, bounds);
+    live.set_local_bounds(incoming_bounds);
     source.parked_local = Some(window);
     destination.memory = live;
+    destination.local_window_scratch = scratch;
 
     let local_keys = LOCAL_MEMORY_BASE..HEAP_MEMORY_BASE as u32;
     let source_locals = source
@@ -659,30 +666,48 @@ fn hand_over_memory(source: &mut Vm, destination: &mut Vm) {
 
 /// A thread's own local region, out of its parked copy or its buffer (a new
 /// thread starts with a buffer of its own). The buffer is released.
-pub(crate) fn take_local_window(vm: &mut Vm) -> Vec<u8> {
+pub(crate) fn take_local_window(vm: &mut Vm) -> LocalWindow {
     let local = LOCAL_MEMORY_BASE as usize..HEAP_MEMORY_BASE;
     if let Some(window) = vm.parked_local.take() {
-        vm.memory = Vec::new();
+        vm.memory = Vec::new().into();
         return window;
     }
-    let mut buffer = std::mem::take(&mut vm.memory);
+    let mut buffer = std::mem::take(&mut vm.memory).into_vec();
+    if buffer.is_empty() {
+        return LocalWindow::default();
+    }
     if buffer.len() < HEAP_MEMORY_BASE {
         buffer.resize(HEAP_MEMORY_BASE, 0);
     }
     buffer.truncate(HEAP_MEMORY_BASE);
     buffer.drain(..LOCAL_MEMORY_BASE as usize);
-    buffer.shrink_to_fit();
     debug_assert_eq!(buffer.len(), local.len());
-    buffer
+    LocalWindow::from_dense(buffer)
 }
 
 /// A byte of a thread's local region, parked or not (tests).
 #[cfg(test)]
 pub(crate) fn local_byte(vm: &Vm, addr: usize) -> u8 {
     match vm.parked_local.as_ref() {
-        Some(window) => window[addr - LOCAL_MEMORY_BASE as usize],
+        Some(window) => window.byte(addr - LOCAL_MEMORY_BASE as usize),
         None => vm.memory[addr],
     }
+}
+
+/// Exchange a parked local window with the active process buffer, including
+/// the write bounds. Child threads borrow their owner's window this way so a
+/// compact snapshot need not expand to 2 MiB merely to lend it for one pass.
+pub(crate) fn exchange_saved_local(vm: &mut Vm, window: &mut LocalWindow) {
+    if vm.memory.len() < HEAP_MEMORY_BASE {
+        vm.memory.resize(HEAP_MEMORY_BASE, 0);
+    }
+    let bounds = vm.memory.local_bounds();
+    let incoming_bounds = window.prefix_lengths();
+    window.exchange_bounded(
+        &mut vm.memory[LOCAL_MEMORY_BASE as usize..HEAP_MEMORY_BASE],
+        &mut vm.local_window_scratch, bounds,
+    );
+    vm.memory.set_local_bounds(incoming_bounds);
 }
 
 /// A thread's local region wherever it is: parked, or in its buffer.
@@ -691,7 +716,7 @@ pub(crate) fn local_window_mut(vm: &mut Vm) -> &mut [u8] {
         vm.memory.resize(HEAP_MEMORY_BASE, 0);
     }
     match vm.parked_local.as_mut() {
-        Some(window) => window,
+        Some(window) => window.as_mut_slice(),
         None => &mut vm.memory[LOCAL_MEMORY_BASE as usize..HEAP_MEMORY_BASE],
     }
 }
@@ -972,5 +997,85 @@ mod tests {
             ["BG0001".to_string(), "face".to_string()]
         );
         assert_eq!(root.next_indexed_record_handle, 18);
+    }
+
+    #[test]
+    fn child_threads_borrow_locals_without_keeping_idle_windows() {
+        let program = ethornell_script::parse_bp_program(None, &[0x17]);
+        let mut root = Vm::new();
+        root.start(&program);
+        let local = LOCAL_MEMORY_BASE as usize;
+        root.memory[local + 32] = 0x12;
+        let code_byte = local + crate::CODE_WINDOW_OFFSET as usize + 17;
+        root.memory[code_byte] = 0x34;
+        let heap = root.alloc_heap(16);
+        root.write_c_string_raw(heap, "shared").unwrap();
+        let owner = root.thread.thread_id();
+        root.start_child_thread(64, 256, 256, 0, false).unwrap();
+        root.start_child_thread(64, 256, 256, 0, false).unwrap();
+        let mut children = std::mem::take(&mut root.async_tasks);
+        for (index, child) in children.iter_mut().enumerate() {
+            assert_eq!(child.vm.local_window_owner, Some(owner));
+            assert!(child.vm.memory.is_empty());
+            assert!(child.vm.parked_local.is_none());
+            transfer_async_shared_state(&mut root, &mut child.vm);
+            crate::child_thread::lend_local_window(&mut root, &mut child.vm);
+            assert_eq!(child.vm.memory[local + 32], 0x12 + index as u8);
+            assert_eq!(child.vm.memory[code_byte], 0x34 + index as u8);
+            assert_eq!(child.vm.read_c_string(heap).unwrap(), "shared");
+            child.vm.memory[local + 32] += 1;
+            child.vm.memory[code_byte] += 1;
+            crate::child_thread::lend_local_window(&mut root, &mut child.vm);
+            transfer_async_shared_state(&mut child.vm, &mut root);
+            assert!(child.vm.memory.is_empty());
+            assert!(child.vm.parked_local.as_ref().unwrap().is_empty());
+            assert!(child.vm.local_window_scratch.is_empty());
+            // The process scratch only stages compact prefixes; it never
+            // needs more storage than the former dense 2 MiB window.
+            assert!(root.local_window_scratch.capacity() <= crate::HEAP_OFFSET_BASE as usize);
+        }
+        assert_eq!(root.memory[local + 32], 0x14);
+        assert_eq!(root.memory[code_byte], 0x36);
+        assert_eq!(root.read_c_string(heap).unwrap(), "shared");
+    }
+
+    #[test]
+    fn new_async_thread_installs_code_without_a_full_process_buffer() {
+        let code = [0x02, 1, 2, 3, 4, 0x17];
+        let program = ethornell_script::parse_bp_program(None, &code);
+        let mut root = Vm::new();
+        root.start_async_program_with_args(Value::Program(Arc::new(program)), Vec::new(), false)
+            .unwrap();
+        let mut child = root.async_tasks.pop().unwrap().vm;
+        assert!(child.memory.is_empty());
+        transfer_async_shared_state(&mut root, &mut child);
+        assert_eq!(
+            &child.memory[(LOCAL_MEMORY_BASE + crate::CODE_WINDOW_OFFSET) as usize..][..code.len()],
+            &code,
+        );
+    }
+
+    #[test]
+    fn global_user_data_moves_between_threads_without_idle_snapshots() {
+        let mut root = Vm::new();
+        let last = root.global_user_data.len() - 1;
+        root.global_user_data[0] = 0x12;
+        root.global_user_data[last] = 0x34;
+        let program = ethornell_script::parse_bp_program(None, &[0x17]);
+        root.start_async_program_with_args(Value::Program(Arc::new(program)), Vec::new(), false)
+            .unwrap();
+        let mut child = root.async_tasks.pop().unwrap().vm;
+        assert!(child.global_user_data.is_empty());
+        let allocation = root.global_user_data.as_ptr();
+        transfer_async_shared_state(&mut root, &mut child);
+        assert!(root.global_user_data.is_empty());
+        assert_eq!(child.global_user_data.as_ptr(), allocation);
+        assert_eq!(child.global_user_data[0], 0x12);
+        assert_eq!(child.global_user_data[last], 0x34);
+        child.global_user_data[last] = 0x56;
+        transfer_async_shared_state(&mut child, &mut root);
+        assert!(child.global_user_data.is_empty());
+        assert_eq!(root.global_user_data.as_ptr(), allocation);
+        assert_eq!(root.global_user_data[last], 0x56);
     }
 }

@@ -7,6 +7,9 @@ pub(crate) struct FilteredSpriteDraw {
     y: f32,
     width: u32,
     height: u32,
+    input: RuntimeGraphDrawItem,
+    revision: u64,
+    filters: Vec<(i32, i32)>,
 }
 /// Mode2 stores rotation separately; mode5 supplies its native local quad.
 pub(super) fn item_quad(item: &RuntimeGraphDrawItem) -> Option<[[f32; 2]; 4]> {
@@ -30,7 +33,8 @@ pub(super) fn item_quad(item: &RuntimeGraphDrawItem) -> Option<[[f32; 2]; 4]> {
 }
 impl RuntimeTraceApi {
     pub(super) fn refresh_native_sprite_filters(&mut self) {
-        self.native_sprite_filtered_draws.clear();
+        // Build raw draw items without applying last frame's filtered pixels.
+        let mut previous = std::mem::take(&mut self.native_sprite_filtered_draws);
         let candidates = self
             .graph_draw_items()
             .into_iter()
@@ -48,13 +52,21 @@ impl RuntimeTraceApi {
             })
             .collect::<Vec<_>>();
         for (object, item, filters) in candidates {
+            let revision = self.graph_image_revision(&item.key);
+            if let Some(old) = previous.remove(&object)
+                && old.input == item && old.revision == revision && old.filters == filters
+                && self.graph_images.contains_key(&old.key)
+            {
+                self.native_sprite_filtered_draws.insert(object, old);
+                continue;
+            }
             let Some(source) = self.graph_images.get(&item.key) else {
                 continue;
             };
             let Some((mut image, x, y)) = rasterize_source(source, &item) else {
                 continue;
             };
-            for (packed, color) in filters {
+            for &(packed, color) in &filters {
                 apply_color_filter(
                     &mut image,
                     ((packed as u32 >> 8) & 255) as u8,
@@ -74,6 +86,9 @@ impl RuntimeTraceApi {
                     y,
                     width,
                     height,
+                    input: item,
+                    revision,
+                    filters,
                 },
             );
         }
@@ -282,6 +297,21 @@ mod tests {
             &snapshot::compose_runtime_frame(&api, false).rgba[..4],
             &[255, 0, 0, 255]
         );
+        let key = format!("runtime:sprite-filter:{object}");
+        let revision = api.graph_image_revision(&key);
+        api.refresh_native_sprite_filters();
+        assert_eq!(api.graph_image_revision(&key), revision);
+        // Changing the source while keeping its bitmap identity invalidates
+        // the cached sprite pixels.
+        let source_key = api.graph_resources[&100].key.clone();
+        let original = api.graph_images[&source_key].clone();
+        let mut changed = original.clone();
+        changed.rgba[0] = 77;
+        api.store_graph_image(source_key.clone(), changed);
+        api.refresh_native_sprite_filters();
+        assert_ne!(api.graph_image_revision(&key), revision);
+        api.store_graph_image(source_key, original);
+        api.refresh_native_sprite_filters();
         call(&mut api, 0x38, &[object, 0x11, 2, 0]);
         assert_eq!(
             &snapshot::compose_runtime_frame(&api, false).rgba[..4],

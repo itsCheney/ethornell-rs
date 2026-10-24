@@ -247,7 +247,7 @@ impl StackEffectState {
             return;
         }
 
-        match instruction.opcode_name.as_str() {
+        match instruction.opcode.name() {
             "push_byte" | "push_word" | "push_dword" | "push_base_offset" | "push_string"
             | "push_offset" | "load_base" => self.push(1),
             "store_base" | "jmp" | "call" => self.pop(1),
@@ -693,6 +693,10 @@ pub fn known_call_arg_count(group: u8, id: u16) -> Option<usize> {
         (0x92, 0xf1) => 6,
         (0x92, 0xf2) => 13,
         (0x92, 0x19) | (0x92, 0x8e) => 1,
+        // Not in the reference build's table: Wonderful Everyday's
+        // logwnd._bp passes (destination, source, width) and pushes nothing
+        // back before its next call.
+        (0x92, 0x1b) => 3,
         // Tayutama2_trial_TG.exe: funcs_486FEE[0x9c] -> sub_4867D0.
         // The native handler pops 21 BP values before calling sub_403B10.
         (0x92, 0x9c) => 21,
@@ -858,5 +862,13 @@ mod tests {
     fn graph_control_selectors_follow_target_abi_descriptor() {
         assert_eq!(known_call_arg_count(0x90, 0x21), Some(9));
         assert_eq!(known_call_arg_count(0x90, 0x22), Some(7));
+    }
+
+    #[test]
+    fn graph92_1b_pops_its_three_arguments() {
+        // Wonderful Everyday's log halo; without an arity the VM handed the
+        // call no arguments and left all three on the operand stack.
+        assert_eq!(known_call_arg_count(0x92, 0x1b), Some(3));
+        assert!(!super::known_call_returns_value(0x92, 0x1b));
     }
 }

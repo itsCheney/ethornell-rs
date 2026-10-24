@@ -867,6 +867,7 @@ name = "ethornell-app"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "chardetng",
  "encoding_rs",
  "ethornell-archive",
  "ethornell-audio",

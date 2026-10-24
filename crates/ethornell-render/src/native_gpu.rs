@@ -48,6 +48,7 @@ struct Texture {
 struct TextKey {
     text: String,
     size: u32,
+    line_height: Option<u32>,
     color: [u32; 4],
     styles: Vec<TextStyleSpan>,
     glow: Option<TextGlow>,
@@ -228,9 +229,10 @@ impl Renderer<'_> {
         validate_rgba(image)?;
         let native = unsafe { (self.gpu.create)(image.width, image.height, image.rgba.as_ptr()) };
         if native == 0 {
-            return Err(EthornellError::Other(
-                "native GPU texture allocation failed".into(),
-            ));
+            return Err(EthornellError::Other(format!(
+                "native GPU texture allocation failed: {}x{} RGBA",
+                image.width, image.height,
+            )));
         }
         let id = self.next;
         self.next = self
@@ -354,6 +356,7 @@ impl Renderer<'_> {
                 y: 16.,
                 color: [1.; 4],
                 size: 24.,
+                line_height: None,
                 styles: Vec::new(),
                 glow: None,
                 clip: None,
@@ -414,6 +417,7 @@ impl Renderer<'_> {
                 y,
                 color,
                 size,
+                line_height,
                 styles,
                 glow,
                 clip,
@@ -424,6 +428,7 @@ impl Renderer<'_> {
                 let key = TextKey {
                     text: text.clone(),
                     size: size.to_bits(),
+                    line_height: line_height.map(f32::to_bits),
                     color: color.map(f32::to_bits),
                     styles: styles.clone(),
                     glow,
@@ -432,7 +437,8 @@ impl Renderer<'_> {
                 let texture = if let Some(t) = self.text_cache.get(&key) {
                     t.clone()
                 } else {
-                    let mut img = rasterize_text(&self.font, &text, size, color, &styles);
+                    let mut img =
+                        rasterize_text(&self.font, &text, size, line_height, color, &styles);
                     if let Some(glow) = glow {
                         img = apply_text_glow(&img, glow);
                     }

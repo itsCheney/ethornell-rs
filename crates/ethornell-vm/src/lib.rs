@@ -21,6 +21,8 @@ mod debug;
 mod extended_opcodes;
 mod host_request;
 mod input;
+mod local_window;
+pub use local_window::VmMemory;
 mod logic;
 pub mod native_call;
 pub mod native_input;
@@ -1312,6 +1314,13 @@ pub trait GraphApi {
         0
     }
 
+    /// The message waits at the end of its text: `sub_433E40` runs
+    /// `sub_433F40`, which cycles the Graph90:98 caret frames every Graph90:99
+    /// delay as a child sprite of the message window. Called on every tick of
+    /// that wait with the engine clock; `finish_native_message` hides the
+    /// caret again (`sub_42BAB0(window, 0, 0)`).
+    fn tick_native_message_caret(&mut self, _now_tick: u32) {}
+
     fn register_graph_color_lut(&mut self, _id: i32, _points: [[i32; 2]; 3]) -> bool {
         false
     }
@@ -2285,19 +2294,17 @@ fn placeholder_loaded_program(
     labels.insert(0x10, 0);
     BpProgram {
         script_name: Some(name),
-        functions: Vec::new(),
-        strings: Vec::new(),
+        functions: std::sync::Arc::new(Vec::new()),
+        strings: std::sync::Arc::new(Vec::new()),
         instructions: std::sync::Arc::new(vec![BpInstruction {
             offset: 0x10,
             opcode: BpOpcode::Known {
                 code: 0x17,
                 name: opcode_name,
             },
-            opcode_hex: "0x17".into(),
-            opcode_name: opcode_name.into(),
-            operands: Vec::new(),
+            operands: Vec::new().into(),
             known_call: None,
-            raw: vec![0x17],
+            raw: vec![0x17].into(),
             warning: Some(warning.into()),
         }]),
         labels: std::sync::Arc::new(labels),
@@ -2315,6 +2322,9 @@ pub struct Vm {
     ready_host_response: Option<HostResponse>,
     fatal_async_report: Option<Box<VmRunReport>>,
     async_reports: Vec<VmRunReport>,
+    /// Threads that ended their slice with Sys80:5F in the most recent root
+    /// scheduler pass (the root and its children).
+    pass_yields: usize,
     graph_text_encoding: Option<&'static encoding_rs::Encoding>,
     pub stack: Vec<Value>,
     operand_slots: Vec<Value>,
@@ -2333,10 +2343,13 @@ pub struct Vm {
     /// removes the most recently appended record without consuming a handle.
     target_loaded_programs: Vec<usize>,
     pub current_program: usize,
-    pub memory: Vec<u8>,
+    pub memory: VmMemory,
     /// An idle thread's local region (`LOCAL_MEMORY_BASE..HEAP_MEMORY_BASE`)
     /// while another thread holds the process memory (`memory` is then empty).
-    parked_local: Option<Vec<u8>>,
+    parked_local: Option<local_window::LocalWindow>,
+    /// One reusable restore buffer follows the active process memory so idle
+    /// local windows can stay compact without allocating at each handover.
+    local_window_scratch: Vec<u8>,
     // Native writes and thread transfers operate on address ranges. Keep the
     // shadow values ordered so a small write does not scan every scene record.
     pub mem_values: BTreeMap<u32, Value>,
@@ -2584,11 +2597,18 @@ pub(crate) const MAIN_THREAD_ID: i32 = 1;
 
 impl Vm {
     pub fn new() -> Self {
+        Self::with_buffers(
+            vec![0; INITIAL_MEMORY_SIZE],
+            vec![0; user_data::GLOBAL_USER_DATA_SIZE],
+        )
+    }
+
+    fn with_buffers(memory: Vec<u8>, global_user_data: Vec<u8>) -> Self {
         let mut vm = Self {
             trace_id: NEXT_VM_TRACE_ID.fetch_add(1, Ordering::Relaxed),
             operand_slots: vec![Value::Int(0); OPERAND_STACK_CAPACITY],
             native_abi_profile: NativeAbiProfile::default(),
-            memory: vec![0; INITIAL_MEMORY_SIZE],
+            memory: memory.into(),
             parked_local: None,
             heap_ptr: 0x0020_0000,
             rng_seed: 1,
@@ -2600,7 +2620,7 @@ impl Vm {
             // continue from 2.
             next_thread_id: MAIN_THREAD_ID + 1,
             global_size: user_data::GLOBAL_CONFIG_SIZE,
-            global_user_data: vec![0; user_data::GLOBAL_USER_DATA_SIZE],
+            global_user_data,
             ..Self::default()
         };
         vm.thread.set_thread_id(MAIN_THREAD_ID);
@@ -2618,8 +2638,19 @@ impl Vm {
         self.system81_shared.lock().expect("system81 state poisoned").clock_jump_threshold_ms as u32
     }
 
+    /// How many threads ended their slice with Sys80:5F in the most recent
+    /// scheduler pass (`run_loaded`), children included.
+    pub fn yields_in_last_pass(&self) -> usize {
+        self.pass_yields
+    }
+
     pub fn advance_time_ms(&mut self, milliseconds: u64) {
         self.timing.advance(milliseconds);
+    }
+
+    /// The configured display-text code page, including the Shift-JIS default.
+    pub fn graph_text_encoding(&self) -> &'static encoding_rs::Encoding {
+        self.graph_text_encoding.unwrap_or(encoding_rs::SHIFT_JIS)
     }
 
     /// Select the code page of text passed to native graph drawing calls.
@@ -2645,6 +2676,10 @@ impl Vm {
     }
 
     pub fn start(&mut self, program: &BpProgram) {
+        self.start_execution(program, true);
+    }
+
+    fn start_execution(&mut self, program: &BpProgram, install_code: bool) {
         self.pending_host_request = None;
         self.ready_host_response = None;
         self.fatal_async_report = None;
@@ -2656,7 +2691,9 @@ impl Vm {
         self.programs.push(program.clone());
         self.program_code_bases.clear();
         self.program_code_bases.push(0);
-        self.install_module_code(0, &program.code);
+        if install_code {
+            self.install_module_code(0, &program.code);
+        }
         self.program_active.clear();
         self.program_active.push(true);
         self.target_loaded_programs.clear();
@@ -2695,15 +2732,30 @@ impl Vm {
     where
         A: SysApi + GraphApi + SoundApi,
     {
+        self.run_loaded_internal(api, options, true)
+    }
+
+    fn run_loaded_internal<A>(
+        &mut self,
+        api: &mut A,
+        options: &VmRunOptions,
+        reconcile_public_stack: bool,
+    ) -> VmRunReport
+    where
+        A: SysApi + GraphApi + SoundApi,
+    {
         if let Some(report) = &self.fatal_async_report {
             return (**report).clone();
         }
         self.collect_diagnostics = options.collect_diagnostics;
         self.async_reports.clear();
-        // `stack` is public for embedders and tests. Reconcile it once at the
-        // host slice boundary; instruction dispatch maintains the ring
-        // incrementally after this point.
-        self.operand_slots_synced_len = 0;
+        self.pass_yields = 0;
+        // Public entry points reconcile direct embedder writes to `stack`.
+        // Private asynchronous contexts maintain their ring incrementally and
+        // retain the synchronized prefix across scheduler slices.
+        if reconcile_public_stack {
+            self.operand_slots_synced_len = 0;
+        }
         self.sync_operand_slots();
         let mut steps = 0usize;
         let step_limit = options.max_steps.min(TARGET_COOPERATIVE_QUANTUM_STEPS);
@@ -2716,6 +2768,9 @@ impl Vm {
         let trace_stack_offset_min = trace_u32_env("TRACE_STACK_OFFSET_MIN");
         let trace_stack_offset_max = trace_u32_env("TRACE_STACK_OFFSET_MAX");
         let mut instruction_profile = debug::InstructionProfile::from_env(self.trace_id);
+        let profile_instructions = instruction_profile.is_enabled();
+        let trace_motion = debug::debug_enabled();
+        let trace_message_loop = debug::trace_msgwnd_enabled();
         let trace_events =
             std::env::var_os("TRACE_VM_EVENTS").is_some() || std::env::var_os("DEBUG").is_some();
         if !self.halted && !std::mem::take(&mut self.suppress_async_pump_once) {
@@ -2769,13 +2824,15 @@ impl Vm {
                 .set_instruction_ips(inst.offset as u32, next_instruction_ip);
             let stack_before = self.stack.len();
             let pc_before = self.pc;
-            instruction_profile.record(self, program_index, pc_before);
+            if profile_instructions {
+                instruction_profile.record(self, program_index, pc_before);
+            }
             if options.trace {
                 println!(
                     "pc={} off=0x{:08X} {} {:?} stack_top={:?}",
                     self.pc,
                     inst.offset,
-                    inst.opcode_name,
+                    inst.opcode.name(),
                     inst.operands,
                     self.stack.last()
                 );
@@ -2786,7 +2843,7 @@ impl Vm {
                     self.program_name(program_index),
                     self.pc,
                     inst.offset,
-                    inst.opcode_name,
+                    inst.opcode.name(),
                     inst.operands
                 ));
             } else if options.fail_on_stub {
@@ -2797,7 +2854,9 @@ impl Vm {
                 }
                 self.recent_steps.push_back((program_index, self.pc, inst.offset));
             }
-            self.trace_mtn_body_dispatch(inst.offset);
+            if trace_motion {
+                self.trace_mtn_body_dispatch(inst.offset);
+            }
             match self.dispatch_program(
                 program_index,
                 inst,
@@ -2823,7 +2882,7 @@ impl Vm {
                         if trace_stack_vm.is_none_or(|trace_id| trace_id == self.trace_id)
                             && program_matches
                             && offset_matches
-                            && (delta != 0 || inst.opcode_name.starts_with("sys"))
+                            && (delta != 0 || inst.opcode.name().starts_with("sys"))
                         {
                             eprintln!(
                                 "TRACE_STACK vm={} program={} pc={} off=0x{:08X} op={} {:?} stack {} -> {} ({:+}) next_pc={} top={:?}",
@@ -2831,7 +2890,7 @@ impl Vm {
                                 program_name,
                                 pc_before,
                                 inst.offset,
-                                inst.opcode_name,
+                                inst.opcode.name(),
                                 inst.operands,
                                 stack_before,
                                 stack_after,
@@ -2847,7 +2906,9 @@ impl Vm {
                         }
                     }
                     steps += 1;
-                    self.trace_msgwnd_loop(inst.offset as u32);
+                    if trace_message_loop {
+                        self.trace_msgwnd_loop(inst.offset as u32);
+                    }
                     if self.pending_host_request.is_some() {
                         stop_reason = VmStopReason::WaitingForHost;
                         break;
@@ -2937,6 +2998,9 @@ impl Vm {
         instruction_profile.report(self, steps);
         if stop_reason == VmStopReason::Completed && !self.pending_host_request_ids().is_empty() {
             stop_reason = VmStopReason::WaitingForHost;
+        }
+        if stop_reason == VmStopReason::Yielded {
+            self.pass_yields += 1;
         }
         VmRunReport {
             steps,
@@ -3049,7 +3113,7 @@ impl Vm {
                             let (name, operands) = program
                                 .instructions
                                 .get(pc)
-                                .map(|inst| (inst.opcode_name.as_str(), format!("{:?}", inst.operands)))
+                                .map(|inst| (inst.opcode.name(), format!("{:?}", inst.operands)))
                                 .unwrap_or(("?", String::new()));
                             format!(
                                 "program={} pc={pc} off=0x{offset:08X} {name} {operands}",
@@ -3069,12 +3133,13 @@ impl Vm {
         A: SysApi + GraphApi + SoundApi,
     {
         self.operand_slots_synced_len = 0;
+        self.sync_operand_slots();
         let old_program = self.current_program;
         let old_pc = self.pc;
         self.programs.push(BpProgram {
             script_name: None,
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![instruction.clone()]),
             labels: Default::default(),
             warnings: Vec::new(),
@@ -3101,33 +3166,24 @@ impl Vm {
     where
         A: SysApi + GraphApi + SoundApi,
     {
-        self.sync_operand_slots();
         let code = instruction.opcode.code();
         let mut next_pc = self.pc + 1;
+        // Canonical bytecodes dispatch by their numeric opcode. Names remain
+        // diagnostic metadata; legacy synthetic aliases below keep their
+        // compatibility handling without putting string matches on core ops.
         match instruction.opcode {
-            BpOpcode::Known {
-                name: "push_byte", ..
-            } => {
+            BpOpcode::Known { code: 0x00, .. } => {
                 self.push_value(Value::Int(read_op_i32(instruction)));
             }
-            BpOpcode::Known {
-                name: "push_word" | "push_dword",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x01 | 0x02, .. } => {
                 self.push_value(Value::Int(read_op_i32(instruction)));
             }
-            BpOpcode::Known {
-                name: "push_base_offset",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x04, .. } => {
                 self.push_value(Value::Ptr(
                     FRAME_SEGMENT | self.mem_ptr.saturating_sub(read_op_u32(instruction)),
                 ));
             }
-            BpOpcode::Known {
-                name: "push_string",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x05, .. } => {
                 if let Some(BpOperand::String(text)) = instruction.operands.first() {
                     // Opcode 0x05 pushes the literal's code address,
                     // `(pc_base + off) | 0x04000000`; the bytes are in the
@@ -3159,25 +3215,18 @@ impl Vm {
                     self.push_value(Value::Ptr(CODE_SEGMENT | address));
                 }
             }
-            BpOpcode::Known {
-                name: "push_offset",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x06, .. } => {
                 // Opcode 0x06 (sub_473650): the plain code-region offset
                 // `insn_start + disp`, without a segment tag.
                 let code = self.code_offset_of(program_index, read_op_u32(instruction));
                 self.push_value(Value::Int(code as i32));
             }
-            BpOpcode::Known {
-                name: "load_base", ..
-            } => {
+            BpOpcode::Known { code: 0x10, .. } => {
                 // sub_473880 pushes the raw frame-memory offset. Only opcode
                 // 0x04 turns base-relative offsets into dereferenceable pointers.
                 self.push_value(Value::Int(self.mem_ptr as i32));
             }
-            BpOpcode::Known {
-                name: "store_base", ..
-            } => {
+            BpOpcode::Known { code: 0x11, .. } => {
                 let previous = self.mem_ptr;
                 let next = self.pop_int()? as u32;
                 // sub_4738A0: the new frame pointer must stay below the data
@@ -3212,13 +3261,13 @@ impl Vm {
                 );
                 self.mem_ptr = next;
             }
-            BpOpcode::Known { name: "load", .. } => {
+            BpOpcode::Known { code: 0x08, .. } => {
                 let width = read_op_u8(instruction);
                 let ptr = self.pop_ptr()?;
                 let value = self.read_value(ptr, width)?;
                 self.push_value(value);
             }
-            BpOpcode::Known { name: "move", .. } => {
+            BpOpcode::Known { code: 0x09, .. } => {
                 let width = read_op_u8(instruction);
                 let value = self.pop_value()?;
                 let ptr = self.pop_ptr()?;
@@ -3227,9 +3276,7 @@ impl Vm {
                 // to return the assigned value on the operand ring.
                 self.push_value(value);
             }
-            BpOpcode::Known {
-                name: "move_arg", ..
-            } => {
+            BpOpcode::Known { code: 0x0a, .. } => {
                 let width = read_op_u8(instruction);
                 let ptr = self.pop_ptr()?;
                 let value = self.pop_value()?;
@@ -3258,10 +3305,7 @@ impl Vm {
                 }
                 self.write_value(ptr, width, &value)?;
             }
-            BpOpcode::Known {
-                name: "copy_inline",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x0b, .. } => {
                 let ptr = self.pop_ptr()?;
                 let bytes = instruction
                     .operands
@@ -3275,9 +3319,7 @@ impl Vm {
                     self.write_int(ptr.wrapping_add(offset as u32), 0, u32::from(byte))?;
                 }
             }
-            BpOpcode::Known {
-                name: "copy_stack", ..
-            } => {
+            BpOpcode::Known { code: 0x0c, .. } => {
                 let width = read_op_u8(instruction);
                 let count = instruction.raw.get(2).copied().unwrap_or_default() as usize;
                 let mut values = Vec::with_capacity(count);
@@ -3301,7 +3343,7 @@ impl Vm {
                     self.write_value(dst.wrapping_add(stride * idx as u32), width, &value)?;
                 }
             }
-            BpOpcode::Known { name: "jmp", .. } => {
+            BpOpcode::Known { code: 0x14, .. } => {
                 let dest = self.pop_int()? as u32;
                 if dest == 0 {
                     // sub_473910 rejects a zero target before the range check.
@@ -3315,7 +3357,7 @@ impl Vm {
                 self.current_program = target_program;
                 next_pc = self.jump_target_index(target_program, parser_offset)?;
             }
-            BpOpcode::Known { name: "jc", .. } => {
+            BpOpcode::Known { code: 0x15, .. } => {
                 let kind = read_op_u8(instruction);
                 let dest = self.pop_int()? as u32;
                 let value = self.pop_int()?;
@@ -3350,7 +3392,7 @@ impl Vm {
                     next_pc = self.jump_target_index(target_program, parser_offset)?;
                 }
             }
-            BpOpcode::Known { name: "call", .. } => match {
+            BpOpcode::Known { code: 0x16, .. } => match {
                 let target = self.pop_value()?;
                 if std::env::var_os("TRACE_SCRMAIN_DISPATCH").is_some()
                     && instruction.offset == 0x3f0
@@ -3468,7 +3510,7 @@ impl Vm {
                     next_pc = self.jump_target_index(dest_program_index, parser_offset)?;
                 }
             },
-            BpOpcode::Known { name: "ret", .. } => {
+            BpOpcode::Known { code: 0x17, .. } => {
                 // sub_474020: a frame stack at the region base ends the thread.
                 if self.mem_ptr <= self.thread.frame_region_base() {
                     self.halted = true;
@@ -3577,19 +3619,15 @@ impl Vm {
                 };
                 self.push_value(Value::Int(value));
             }
-            BpOpcode::Known { name: "not", .. } => {
+            BpOpcode::Known { code: 0x28, .. } => {
                 let value = self.pop_int()?;
                 self.push_value(Value::Int(!value));
             }
-            BpOpcode::Known {
-                name: "bool_zero", ..
-            } => {
+            BpOpcode::Known { code: 0x3a, .. } => {
                 let value = self.pop_int()?;
                 self.push_value(Value::Int((value == 0) as i32));
             }
-            BpOpcode::Known {
-                name: "ternary", ..
-            } => {
+            BpOpcode::Known { code: 0x40, .. } => {
                 let false_value = self.pop_value()?;
                 let true_value = self.pop_value()?;
                 let condition = self.pop_int()?;
@@ -3599,7 +3637,7 @@ impl Vm {
                     false_value
                 });
             }
-            BpOpcode::Known { name: "muldiv", .. } => {
+            BpOpcode::Known { code: 0x42, .. } => {
                 let divisor = self.pop_int()?;
                 let multiplier = self.pop_int()?;
                 let multiplicand = self.pop_int()?;
@@ -3610,7 +3648,7 @@ impl Vm {
                 };
                 self.push_value(Value::Int(value));
             }
-            BpOpcode::Known { name: "atan2", .. } => {
+            BpOpcode::Known { code: 0x43, .. } => {
                 let y = self.pop_int()?;
                 let x = self.pop_int()?;
                 let mut degrees = (y as f64).atan2(x as f64).to_degrees();
@@ -3619,10 +3657,7 @@ impl Vm {
                 }
                 self.push_value(Value::Int((degrees * 65_536.0) as i32));
             }
-            BpOpcode::Known {
-                name: "vec3_length",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x44, .. } => {
                 let z = self.pop_int()? as f64;
                 let y = self.pop_int()? as f64;
                 let x = self.pop_int()? as f64;
@@ -3630,41 +3665,27 @@ impl Vm {
                     (x.mul_add(x, y.mul_add(y, z * z)).sqrt()) as i32,
                 ));
             }
-            BpOpcode::Known {
-                name: "sin" | "cos",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x48 | 0x49, .. } => {
                 let angle = self.pop_int()? as f64;
                 let radians = angle * ((std::f64::consts::PI / 180.0) / 65_536.0);
-                let value = if instruction.opcode.name() == "sin" {
+                let value = if code == 0x48 {
                     radians.sin()
                 } else {
                     radians.cos()
                 };
                 self.push_value(Value::Int((value * 65_536.0) as i32));
             }
-            BpOpcode::Known {
-                name: "qword_add" | "qword_sub" | "qword_mul" | "qword_div" | "qword_mod",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x50 | 0x51 | 0x52 | 0x53 | 0x54, .. } => {
                 self.execute_qword_arithmetic(code)?;
             }
-            BpOpcode::Known {
-                name: "fixed_pow" | "fixed_mul" | "fixed_div",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x55 | 0x56 | 0x57, .. } => {
                 let value = self.execute_fixed_arithmetic(code)?;
                 self.push_value(Value::Int(value));
             }
-            BpOpcode::Known {
-                name:
-                    "vec4_add" | "vec4_sub" | "vec4_mul" | "vec4_div" | "vec3_normalize"
-                    | "vec4_scale" | "vec4_div_scalar",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x58 | 0x59 | 0x5a | 0x5b | 0x5d | 0x5e | 0x5f, .. } => {
                 self.execute_fixed_vector(code)?;
             }
-            BpOpcode::Known { name: "memcpy", .. } => {
+            BpOpcode::Known { code: 0x60, .. } => {
                 let size = self.pop_int()?.max(0) as usize;
                 let src = self.pop_ptr()?;
                 let dst = self.pop_ptr()?;
@@ -3676,7 +3697,7 @@ impl Vm {
                 self.trace_watch_write(dst, size, src, "memcpy");
                 self.copy_shadow_values(src, dst, size);
             }
-            BpOpcode::Known { name: "memclr", .. } => {
+            BpOpcode::Known { code: 0x61, .. } => {
                 let size = self.pop_int()?.max(0) as usize;
                 let ptr = self.pop_ptr()?;
                 let range = self.resolve_write_range(ptr, size)?;
@@ -3685,7 +3706,7 @@ impl Vm {
                 self.clear_shadow_values(ptr, size);
                 self.restore_script_records(ptr, size)?;
             }
-            BpOpcode::Known { name: "memset", .. } => {
+            BpOpcode::Known { code: 0x62, .. } => {
                 let value = self.pop_int()? as u8;
                 let size = self.pop_int()?.max(0) as usize;
                 let ptr = self.pop_ptr()?;
@@ -3695,10 +3716,7 @@ impl Vm {
                 self.clear_shadow_values(ptr, size);
                 self.restore_script_records(ptr, size)?;
             }
-            BpOpcode::Known {
-                name: "memory_equal",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x63, .. } => {
                 let size = self.pop_int()?.max(0) as usize;
                 let right = self.pop_value()?;
                 let left = self.pop_value()?;
@@ -3706,9 +3724,7 @@ impl Vm {
                     == self.value_as_fixed_bytes(right, size)?;
                 self.push_value(Value::Int(i32::from(equal)));
             }
-            BpOpcode::Known {
-                name: "memrepeat", ..
-            } => {
+            BpOpcode::Known { code: 0x64, .. } => {
                 let src = self.pop_ptr()?;
                 let count = self.pop_int()?.max(0) as usize;
                 let size = self.pop_int()?.max(0) as usize;
@@ -3727,9 +3743,7 @@ impl Vm {
                 }
                 self.clear_shadow_values(dst, total);
             }
-            BpOpcode::Known {
-                name: "memfind", ..
-            } => {
+            BpOpcode::Known { code: 0x65, .. } => {
                 let needle = self.pop_ptr()?;
                 let count = self.pop_int()?.max(0) as usize;
                 let size = self.pop_int()?.max(0) as usize;
@@ -3749,9 +3763,7 @@ impl Vm {
                 };
                 self.push_value(Value::Int(found));
             }
-            BpOpcode::Known {
-                name: "strfind", ..
-            } => {
+            BpOpcode::Known { code: 0x66, .. } => {
                 let needle = self.pop_native_string_bytes()?;
                 let haystack = self.pop_native_string_bytes()?;
                 let found = if needle.is_empty() {
@@ -3765,9 +3777,7 @@ impl Vm {
                 };
                 self.push_value(Value::Int(found));
             }
-            BpOpcode::Known {
-                name: "strreplace", ..
-            } => {
+            BpOpcode::Known { code: 0x67, .. } => {
                 // sub_474520 pops replacement, needle, haystack, destination,
                 // runs sub_495A80 and pushes the number of replacements.
                 let replacement = self.pop_native_string_bytes()?;
@@ -3778,35 +3788,31 @@ impl Vm {
                 self.write_c_string_native_bytes(dst, &replaced)?;
                 self.push_value(Value::Int(count));
             }
-            BpOpcode::Known { name: "strlen", .. } => {
+            BpOpcode::Known { code: 0x68, .. } => {
                 // The target runs C strlen over the raw buffer, so bytes that
                 // do not survive a Shift-JIS round trip (GBK fan patches)
                 // must be counted as stored.
                 let bytes = self.pop_native_string_bytes()?;
                 self.push_value(Value::Int(bytes.len() as i32));
             }
-            BpOpcode::Known { name: "streq", .. } => {
+            BpOpcode::Known { code: 0x69, .. } => {
                 let right = self.pop_native_string_bytes()?;
                 let left = self.pop_native_string_bytes()?;
                 self.push_value(Value::Int((left == right) as i32));
             }
-            BpOpcode::Known { name: "strcpy", .. } => {
+            BpOpcode::Known { code: 0x6a, .. } => {
                 let right = self.pop_value()?;
                 let left = self.pop_ptr()?;
                 self.copy_c_string_value(left, right)?;
             }
-            BpOpcode::Known {
-                name: "strconcat", ..
-            } => {
+            BpOpcode::Known { code: 0x6b, .. } => {
                 let right = self.pop_native_string_bytes()?;
                 let mut joined = self.pop_native_string_bytes()?;
                 let dst = self.pop_ptr()?;
                 joined.extend_from_slice(&right);
                 self.write_c_string_native_bytes(dst, &joined)?;
             }
-            BpOpcode::Known {
-                name: "getchar", ..
-            } => {
+            BpOpcode::Known { code: 0x6c, .. } => {
                 let ptr = self.pop_ptr()?;
                 let start = self.memory_addr(ptr) as usize;
                 let first = self.memory.get(start).copied().unwrap_or_default();
@@ -3823,56 +3829,40 @@ impl Vm {
                 self.push_value(Value::Int(is_two_byte as i32));
                 self.push_value(Value::Int(is_sjis_delimiter(ch as u16) as i32));
             }
-            BpOpcode::Known {
-                name: "tolower", ..
-            } => {
+            BpOpcode::Known { code: 0x6d, .. } => {
                 let ptr = self.pop_ptr()?;
                 let text = self.read_c_string(ptr)?.to_ascii_lowercase();
                 self.write_c_string(ptr, &text)?;
             }
-            BpOpcode::Known {
-                name: "quote_string",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x6e, .. } => {
                 self.execute_quote_string()?;
             }
-            BpOpcode::Known {
-                name: "sprintf", ..
-            } => {
+            BpOpcode::Known { code: 0x6f, .. } => {
                 let fmt = self.pop_string_lossy()?;
                 let dst = self.pop_ptr()?;
                 let rendered = self.render_sprintf(&fmt);
                 self.write_c_string(dst, &rendered)?;
             }
-            BpOpcode::Known { name: "malloc", .. } => {
+            BpOpcode::Known { code: 0x70, .. } => {
                 let size = self.pop_int()?.max(0) as u32;
                 let ptr = self.alloc_heap(size);
                 self.push_value(Value::Ptr(ptr));
             }
-            BpOpcode::Known { name: "free", .. } => {
+            BpOpcode::Known { code: 0x71, .. } => {
                 let ptr = self.pop_ptr()?;
                 let freed = self.free_heap(ptr);
                 self.push_value(Value::Int(i32::from(freed)));
             }
-            BpOpcode::Known {
-                name: "set_memory_mode",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x74, .. } => {
                 self.execute_set_memory_mode()?;
             }
-            BpOpcode::Known {
-                name: "addmemboundary",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x75, .. } => {
                 let _name = self.pop_string_lossy()?;
                 let _size = self.pop_int()?;
                 let _start = self.pop_int()?;
                 self.push_value(Value::Int(1));
             }
-            BpOpcode::Known {
-                name: "engine_state",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x77, .. } => {
                 let selector = self.pop_int()?;
                 // sub_443180 exposes native renderer/debug fields. They have no
                 // portable host equivalent; the observed dbgmngr selector 0 is
@@ -3884,9 +3874,7 @@ impl Vm {
                 };
                 self.push_value(Value::Int(value));
             }
-            BpOpcode::Known {
-                name: "confirm", ..
-            } => {
+            BpOpcode::Known { code: 0x78, .. } => {
                 // sub_474FF0: default-button flag first, then the text; the
                 // Yes/No box result (Yes == IDYES) is pushed. A windowless
                 // runtime has no one to ask, so it answers Yes.
@@ -3906,10 +3894,7 @@ impl Vm {
                 tracing::warn!(%message, "BP confirm answered Yes without a dialog");
                 self.push_value(Value::Int(1));
             }
-            BpOpcode::Known {
-                name: "message_box",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x79, .. } => {
                 let message = self
                     .pop_string_lossy()
                     .unwrap_or_else(|_| "<message>".into());
@@ -3925,18 +3910,13 @@ impl Vm {
                 }
                 tracing::warn!(%message, "BP message_box");
             }
-            BpOpcode::Known {
-                name: "show_number",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x7a, .. } => {
                 // sub_4750A0 only displays "Number : %d ( $%.8x )"; it never
                 // asserts and never terminates the script.
                 let value = self.pop_int()?;
                 tracing::warn!(value, "BP show_number: Number : {value} ( ${value:08x} )");
             }
-            BpOpcode::Known {
-                name: "dumpmem", ..
-            } => {
+            BpOpcode::Known { code: 0x7b, .. } => {
                 // sub_475130 pops byte count, data pointer, title pointer.
                 let size = self.pop_int()?;
                 let _data = self.pop_value()?;
@@ -3948,35 +3928,21 @@ impl Vm {
                 }
                 tracing::warn!(%title, size, "BP dumpmem");
             }
-            BpOpcode::Known {
-                name: "modal_list", ..
-            } => {
+            BpOpcode::Known { code: 0x7c, .. } => {
                 let result = self.execute_modal_list()?;
                 self.push_value(Value::Int(result));
             }
-            BpOpcode::Known {
-                name: "resource_transform",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x7d, .. } => {
                 self.execute_resource_transform()?;
             }
-            BpOpcode::Known {
-                name: "clipboard_set",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x7e, .. } => {
                 let result = self.execute_clipboard_set()?;
                 self.push_value(Value::Int(result));
             }
-            BpOpcode::Known {
-                name: "resource_blend",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x7f, .. } => {
                 self.execute_resource_blend()?;
             }
-            BpOpcode::Known {
-                name: "sys1" | "sys2",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x80 | 0x81, .. } => {
                 let id = instruction.raw.get(1).copied().unwrap_or_default() as u16;
                 self.note_call("sys", code, id);
                 api.observe_dispatch(NativeOpcode { group: code, id });
@@ -4299,10 +4265,7 @@ impl Vm {
                 self.current_program = dest_program_index;
                 next_pc = self.jump_target_index(dest_program_index, 0x10)?;
             }
-            BpOpcode::Known {
-                name: "grp1" | "grp2" | "grp3",
-                ..
-            } => {
+            BpOpcode::Known { code: 0x90 | 0x91 | 0x92, .. } => {
                 let id = instruction.raw.get(1).copied().unwrap_or_default() as u16;
                 self.note_call("graph", code, id);
                 api.observe_dispatch(NativeOpcode { group: code, id });
@@ -5457,7 +5420,7 @@ impl Vm {
                     self.push_value(result);
                 }
             }
-            BpOpcode::Known { name: "snd1", .. } => {
+            BpOpcode::Known { code: 0xa0, .. } => {
                 let id = instruction.raw.get(1).copied().unwrap_or_default() as u16;
                 self.note_call("snd", code, id);
                 api.observe_dispatch(NativeOpcode { group: code, id });
@@ -5614,10 +5577,7 @@ impl Vm {
                     self.push_value(result);
                 }
             }
-            BpOpcode::Known {
-                name: "usr1" | "usr2",
-                ..
-            } => {
+            BpOpcode::Known { code: 0xb0 | 0xc0, .. } => {
                 let id = instruction.raw.get(1).copied().unwrap_or_default() as u16;
                 self.note_call("user", code, id);
                 api.observe_dispatch(NativeOpcode { group: code, id });
@@ -5946,19 +5906,14 @@ impl Vm {
                     }
                 }
             }
-            BpOpcode::Known {
-                name: "legacy_3d", ..
-            } => {
+            BpOpcode::Known { code: 0xd0, .. } => {
                 let id = instruction.raw.get(1).copied().unwrap_or_default();
                 self.note_call("legacy3d", code, u16::from(id));
                 if let Some(result) = self.execute_legacy_3d(id)? {
                     self.push_value(result);
                 }
             }
-            BpOpcode::Known {
-                name: "debug_inspect",
-                ..
-            } => {
+            BpOpcode::Known { code: 0xe0, .. } => {
                 let id = instruction.raw.get(1).copied().unwrap_or_default();
                 self.note_call("debug", code, u16::from(id));
                 self.execute_debug_inspect(id)?;
@@ -6443,6 +6398,11 @@ impl Vm {
                     }
                 }
 
+                // sub_433E40 reaches sub_433F40 (the caret) only once the
+                // start delay is over and the text processor has ended.
+                if !api.native_message_is_animating() {
+                    api.tick_native_message_caret(now_tick);
+                }
                 self.thread.replace_current_procedure(InstalledCProcedure {
                     source_opcode: installed.source_opcode,
                     object: CProcedure::DspMsg(procedure),
@@ -13727,6 +13687,7 @@ mod tests {
         message_auto_advance: Option<Option<i32>>,
         message_reveals: usize,
         message_finishes: usize,
+        message_caret_ticks: Vec<u32>,
         window_message_serial: i32,
         window_messages: std::collections::VecDeque<(i32, i32, i32, i32)>,
         system92_text_output_pair: [i32; 2],
@@ -13930,6 +13891,10 @@ mod tests {
 
         fn finish_native_message(&mut self) {
             self.message_finishes += 1;
+        }
+
+        fn tick_native_message_caret(&mut self, now_tick: u32) {
+            self.message_caret_ticks.push(now_tick);
         }
 
         fn register_graph_color_lut(&mut self, id: i32, points: [[i32; 2]; 3]) -> bool {
@@ -14464,11 +14429,9 @@ mod tests {
         BpInstruction {
             offset,
             opcode: BpOpcode::Known { code, name },
-            opcode_hex: format!("0x{code:02X}"),
-            opcode_name: name.into(),
-            operands,
+            operands: operands.into(),
             known_call: None,
-            raw,
+            raw: raw.into(),
             warning: None,
         }
     }
@@ -14476,8 +14439,8 @@ mod tests {
     fn run_stack_program(instructions: Vec<BpInstruction>) -> (crate::VmRunReport, Vm) {
         let program = BpProgram {
             script_name: Some("debug-opcode-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(instructions),
             labels: Default::default(),
             warnings: Vec::new(),
@@ -14614,8 +14577,8 @@ mod tests {
     fn explicit_yield_ends_exactly_one_scheduler_pass() {
         let program = BpProgram {
             script_name: Some("yield-boundary-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x80, "sys1", vec![0x80, 0x5F], Vec::new()),
                 test_instruction(
@@ -14644,8 +14607,10 @@ mod tests {
         assert_eq!(first.pc, 1);
         assert!(vm.stack.is_empty());
         assert_eq!(api.host_sys_calls, 0);
+        assert_eq!(vm.yields_in_last_pass(), 1);
 
         let second = vm.run_loaded(&mut api, &options);
+        assert_eq!(vm.yields_in_last_pass(), 0);
         assert_eq!(second.stop_reason, VmStopReason::Completed);
         assert_eq!(second.steps, 1);
         assert_eq!(vm.stack, [Value::Int(99)]);
@@ -14656,8 +14621,8 @@ mod tests {
     fn unknown_dispatch_halts_vm_instead_of_retrying_mutated_instruction() {
         let program = BpProgram {
             script_name: Some("unknown-dispatch-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![test_instruction(
                 0x10,
                 0x80,
@@ -14692,8 +14657,8 @@ mod tests {
     fn wait_thread_timer_without_a_deadline_returns_false_synchronously() {
         let program = BpProgram {
             script_name: Some("sys80-5a-unrecovered-procedure-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x80, "sys1", vec![0x80, 0x5A], Vec::new()),
                 test_instruction(
@@ -14729,8 +14694,8 @@ mod tests {
     fn unrecovered_one_arg_procedure_consumes_arg_without_inventing_deadline() {
         let program = BpProgram {
             script_name: Some("sys80-54-unrecovered-procedure-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -14783,8 +14748,8 @@ mod tests {
     fn watchdog_does_not_masquerade_as_a_cooperative_yield() {
         let program = BpProgram {
             script_name: Some("watchdog-boundary-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             // Jump targets are code-region offsets: the loop starts at code
             // offset 2 (file offset 0x12).
             instructions: std::sync::Arc::new(vec![
@@ -14825,8 +14790,8 @@ mod tests {
         let destination = 0x2400u32;
         let program = BpProgram {
             script_name: Some("native-memory-opcodes".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -15397,8 +15362,8 @@ mod tests {
         let window = 0xB000_0003u32;
         let program = BpProgram {
             script_name: Some("window-valid-region".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -15443,8 +15408,8 @@ mod tests {
         let table = 0x25c0u32;
         let program = BpProgram {
             script_name: Some("caret-frame-table".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x01, "push_word", vec![0x01], vec![BpOperand::U16(3)]),
                 test_instruction(
@@ -15480,8 +15445,8 @@ mod tests {
         let destination = 0x2600u32;
         let program = BpProgram {
             script_name: Some("bitmap-info-record".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -15526,8 +15491,8 @@ mod tests {
         let bitmap = 43u16;
         let program = BpProgram {
             script_name: Some("bitmap-auxiliary-reference-point".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -15589,8 +15554,8 @@ mod tests {
         let destination = 0x26c0u32;
         let program = BpProgram {
             script_name: Some("bitmap-pixel-read".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -15753,8 +15718,8 @@ mod tests {
         let destination = 0x2700u32;
         let program = BpProgram {
             script_name: Some("movie-position".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -15796,8 +15761,8 @@ mod tests {
         let descriptor = 0x2740u32;
         let program = BpProgram {
             script_name: Some("color-lut-registration".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -15843,8 +15808,8 @@ mod tests {
         let object = 77u16;
         let program = BpProgram {
             script_name: Some("graph-input-region-values".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -15893,8 +15858,8 @@ mod tests {
         let invalid_descriptor = 0x00ff_ff00u32;
         let program = BpProgram {
             script_name: Some("graph90-compact-icon-variant-check".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -15939,8 +15904,8 @@ mod tests {
         let pixels = [10, 20, 30, 40, 50, 60];
         let program = BpProgram {
             script_name: Some("bitmap-rgb-roundtrip".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x01, "push_word", vec![0x01], vec![BpOperand::U16(7)]),
                 test_instruction(0x13, 0x01, "push_word", vec![0x01], vec![BpOperand::U16(2)]),
@@ -15996,8 +15961,8 @@ mod tests {
     fn expanding_the_local_base_zeroes_a_reused_frame() {
         let program = BpProgram {
             script_name: Some("zero-reused-frame".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -16105,8 +16070,8 @@ mod tests {
     fn mediation_program_registration_and_call_preserve_the_native_stack() {
         let mediation = BpProgram {
             script_name: Some("loadbmpdx._bp".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x10, "load_base", vec![0x10], Vec::new()),
                 test_instruction(
@@ -16187,8 +16152,8 @@ mod tests {
         };
         let main = BpProgram {
             script_name: Some("mediation-main".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x10, "load_base", vec![0x10], Vec::new()),
                 test_instruction(
@@ -16853,8 +16818,8 @@ mod tests {
         let destination = 0x2000u32;
         let program = BpProgram {
             script_name: Some("system-event-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -16903,8 +16868,8 @@ mod tests {
         let destination = 0x2200u32;
         let program = BpProgram {
             script_name: Some("bgm-query-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -16946,8 +16911,8 @@ mod tests {
         let source = 0x2600u32;
         let program = BpProgram {
             script_name: Some("sound-memory-registration-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -17018,8 +16983,8 @@ mod tests {
     fn wait_poll_opcodes_do_not_leave_synthetic_stack_values() {
         let program = BpProgram {
             script_name: Some("wait-poll-stack-contract-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -17073,8 +17038,8 @@ mod tests {
     fn native_terminate_interpreter_stops_following_bytecode() {
         let program = BpProgram {
             script_name: Some("terminate-interpreter-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x80, "sys1", vec![0x80, 0x6a], Vec::new()),
                 test_instruction(
@@ -17106,8 +17071,8 @@ mod tests {
     fn recovered_movie_loader_completes_on_the_next_scheduler_pass() {
         let program = BpProgram {
             script_name: Some("procedure-boundary-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -17183,8 +17148,8 @@ mod tests {
     fn host_wait_is_ignored_for_an_abi_nonprocedure_handler() {
         let program = BpProgram {
             script_name: Some("nonprocedure-boundary-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
@@ -17481,6 +17446,77 @@ mod tests {
     }
 
     #[test]
+    fn the_caret_runs_only_while_a_message_waits_at_its_end() {
+        // sub_433E40 calls sub_433F40 (the caret) after the start delay
+        // and once the text processor has ended; a typed message (+0x38 ==
+        // 0) is finalized before that.
+        let message = |end_wait_policy: i32| {
+            super::native_thread::InstalledCProcedure::dsp_msg(
+                super::MAIN_THREAD_ID,
+                NativeOpcode {
+                    group: 0x90,
+                    id: 0x90,
+                },
+                0,
+                super::NativeMessageProcedureConfig {
+                    class: super::NativeMessageProcedureClass::DspMsg,
+                    initial_delay_enabled: true,
+                    initial_delay_ms: 100,
+                    reveal_duration_ms: 0,
+                    reveal_steps: 0,
+                    reveal_step_delay_ms: 0,
+                    settle_steps: 0,
+                    settle_step_delay_ms: 0,
+                    auto_advance_delay_ms: None,
+                    input_scope: 2,
+                    completion_control: 0,
+                    end_wait_policy,
+                    allow_high_bit_input: true,
+                    allow_auxiliary_input: true,
+                    auxiliary_input_mask: 0,
+                    input_forces_completion: false,
+                },
+            )
+        };
+
+        let mut vm = Vm::new();
+        vm.install_cprocedure(message(0), false);
+        let mut api = SchedulingApi::default();
+        assert_eq!(vm.poll_current_procedure(&mut api, false), None);
+        assert!(api.message_caret_ticks.is_empty());
+
+        let mut vm = Vm::new();
+        vm.install_cprocedure(message(1), false);
+        let mut api = SchedulingApi {
+            message_animating: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        api.message_animating = false;
+        vm.advance_time_ms(50);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        assert!(api.message_caret_ticks.is_empty());
+        vm.advance_time_ms(50);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        vm.advance_time_ms(500);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        assert_eq!(api.message_caret_ticks, [100, 600]);
+        assert_eq!(api.message_finishes, 0);
+    }
+
+    #[test]
     fn message_callback_256_force_completes_without_fabricating_input_value() {
         let mut vm = Vm::new();
         vm.stack.push(Value::Int(77));
@@ -17765,8 +17801,8 @@ mod tests {
     fn wait_timing_ex_reports_input_or_time_without_spinning() {
         let program = BpProgram {
             script_name: Some("wait-boundary-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![test_instruction(
                 0x10,
                 0x80,
@@ -18371,8 +18407,8 @@ mod tests {
     fn script_errors_are_captured_with_the_target_header() {
         let program = BpProgram {
             script_name: Some("err-test".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: std::sync::Arc::new(Vec::new()),
+            strings: std::sync::Arc::new(Vec::new()),
             instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x00, "push_byte", vec![0x00, 0x00], vec![BpOperand::U8(0)]),
                 test_instruction(0x12, 0x14, "jmp", vec![0x14], Vec::new()),

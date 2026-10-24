@@ -302,6 +302,18 @@ impl RuntimeTraceApi {
                 }
                 ethornell_vm::Value::Int(advance)
             }
+            0x1b => {
+                // Not in the reference build; inferred from logwnd._bp, which
+                // blends the result over the text at (-8, -8) with
+                // transparency 64: see Graph92_1B_OutlineBitmapHalo.
+                let width = pop_int_value(stack).unwrap_or_default();
+                let source = pop_int_value(stack).unwrap_or_default();
+                let destination = pop_int_value(stack).unwrap_or_default();
+                if let Some(image) = self.graph_bitmap_image(source) {
+                    self.store_runtime_bitmap(destination, outline_halo(&image, width), 2);
+                }
+                ethornell_vm::Value::None
+            }
             0x1f => {
                 // sub_4020D0 allocates a temporary input buffer, searches the
                 // target resource/filesystem path for the supplied name, then
@@ -402,5 +414,51 @@ impl RuntimeTraceApi {
         self.graph_resources
             .insert(bitmap, RuntimeGraphResource::whole(key));
         true
+    }
+}
+
+/// Margin of a Graph92:1B outline on every side of its source.
+const OUTLINE_HALO_MARGIN: usize = 8;
+
+/// White, with the alpha of the source's coverage summed over a
+/// `(2 * width + 1)` square box (capped at opaque) where the source itself
+/// is not covered, on a bitmap `OUTLINE_HALO_MARGIN` pixels larger on every
+/// side: blended over the source at the margin's offset it outlines the
+/// source's glyphs without covering them.
+fn outline_halo(source: &DecodedImage, width: i32) -> DecodedImage {
+    let radius = width.clamp(0, OUTLINE_HALO_MARGIN as i32) as usize;
+    let (source_width, source_height) = (source.width as usize, source.height as usize);
+    let margin = OUTLINE_HALO_MARGIN;
+    let (out_width, out_height) = (source_width + 2 * margin, source_height + 2 * margin);
+    let alpha_at = |x: isize, y: isize| -> u32 {
+        if x < 0 || y < 0 || x >= source_width as isize || y >= source_height as isize {
+            return 0;
+        }
+        u32::from(source.rgba[(y as usize * source_width + x as usize) * 4 + 3])
+    };
+    let mut rgba = vec![0u8; out_width * out_height * 4];
+    for y in 0..out_height {
+        for x in 0..out_width {
+            let (sx, sy) = (x as isize - margin as isize, y as isize - margin as isize);
+            let own = alpha_at(sx, sy);
+            if radius == 0 || own == 255 {
+                continue;
+            }
+            let r = radius as isize;
+            let mut sum = 0u32;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    sum += alpha_at(sx + dx, sy + dy);
+                }
+            }
+            let at = (y * out_width + x) * 4;
+            rgba[at..at + 3].copy_from_slice(&[255, 255, 255]);
+            rgba[at + 3] = (sum.min(255) * (255 - own) / 255) as u8;
+        }
+    }
+    DecodedImage {
+        width: out_width as u32,
+        height: out_height as u32,
+        rgba,
     }
 }

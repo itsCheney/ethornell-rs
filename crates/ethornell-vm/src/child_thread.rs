@@ -112,8 +112,16 @@ impl RegionReservations {
 
 /// Swaps the local windows of two VMs: a child runs in its owner's.
 pub(crate) fn lend_local_window(owner: &mut Vm, child: &mut Vm) {
-    let owner_window = crate::async_program::local_window_mut(owner);
-    owner_window.swap_with_slice(crate::async_program::local_window_mut(child));
+    if owner.parked_local.is_some() && child.parked_local.is_some() {
+        std::mem::swap(&mut owner.parked_local, &mut child.parked_local);
+    } else if let Some(window) = owner.parked_local.as_mut() {
+        crate::async_program::exchange_saved_local(child, window);
+    } else if let Some(window) = child.parked_local.as_mut() {
+        crate::async_program::exchange_saved_local(owner, window);
+    } else {
+        let owner_window = crate::async_program::local_window_mut(owner);
+        owner_window.swap_with_slice(crate::async_program::local_window_mut(child));
+    }
 }
 
 impl Vm {
@@ -203,6 +211,10 @@ impl Vm {
         child.thread.set_region_sizes(code_bytes, data_bytes, operand_slots);
         child.thread.set_child_regions(code_start, data_start);
         child.sync_thread_program_region();
+        // This thread executes in its owner's local window. The temporary
+        // buffer used to initialize the root module will never be read.
+        child.memory = Vec::new().into();
+        child.parked_local = None;
         if trace_events {
             tracing::info!(
                 thread_id,

@@ -101,18 +101,17 @@ impl Vm {
     }
 
     pub(crate) fn scenario_guarded_read_int(&self, ptr: u32, width: u8) -> Option<u32> {
-        if width < 2 {
+        if width < 2 || self.loaded_bcs_ranges.is_empty() {
             return None;
         }
 
         let code_base = self.read_raw_u32(SCRIPT_CODE_BASE_SLOT)?;
-        let code_base_addr = self.memory_addr(code_base);
         let current_offset = self.read_raw_u32(SCRIPT_CURRENT_OFFSET_SLOT)?;
-        if self.memory_addr(ptr) != self.memory_addr(code_base.wrapping_add(current_offset)) {
+        let ptr_addr = self.memory_addr(ptr);
+        if ptr_addr != self.memory_addr(code_base.wrapping_add(current_offset)) {
             return None;
         }
 
-        let ptr_addr = self.memory_addr(ptr);
         if self.loaded_bcs_ranges.iter().any(|range| {
             ptr_addr >= range.base.saturating_add(range.code_start)
                 && ptr_addr < range.base.saturating_add(range.code_end)
@@ -120,6 +119,7 @@ impl Vm {
             return None;
         }
 
+        let code_base_addr = self.memory_addr(code_base);
         let range = self.loaded_bcs_ranges.iter().find(|range| {
             code_base_addr >= range.base
                 && code_base_addr < range.base.saturating_add(range.total_len)

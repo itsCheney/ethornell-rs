@@ -41,6 +41,10 @@ impl InstructionProfile {
         }
     }
 
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     pub(crate) fn record(&mut self, vm: &Vm, program_index: usize, pc: usize) {
         if !self.enabled {
             return;
@@ -82,7 +86,7 @@ impl InstructionProfile {
                 program = vm.program_name(program_index),
                 pc,
                 offset = format_args!("0x{:08X}", instruction.offset),
-                opcode = instruction.opcode_name,
+                opcode = instruction.opcode.name(),
                 count,
                 slice_steps,
                 "VM instruction profile"
@@ -91,12 +95,12 @@ impl InstructionProfile {
     }
 }
 
-fn debug_enabled() -> bool {
+pub(crate) fn debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("DEBUG").is_some())
 }
 
-fn trace_msgwnd_enabled() -> bool {
+pub(crate) fn trace_msgwnd_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("TRACE_MSGWND_LOOP").is_some())
 }

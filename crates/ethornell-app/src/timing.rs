@@ -31,6 +31,14 @@ pub(crate) fn normalize_engine_elapsed_ms(elapsed_ms: u64, threshold_ms: u32) ->
     }
 }
 
+/// Console suspension resets the host clock explicitly. A slow software
+/// effect is still an active frame; bound its delta so repeated slow frames
+/// cannot be discarded as pause gaps and freeze the effect's completion timer.
+#[cfg(any(test, feature = "console"))]
+pub(crate) fn console_engine_elapsed_ms(elapsed_ms: u64, threshold_ms: u32) -> u64 {
+    elapsed_ms.min(u64::from(threshold_ms))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,5 +62,17 @@ mod tests {
         assert_eq!(normalize_engine_elapsed_ms(500, 500), 500);
         assert_eq!(normalize_engine_elapsed_ms(501, 500), 0);
         assert_eq!(normalize_engine_elapsed_ms(5_000, 500), 0);
+    }
+
+    #[test]
+    fn slow_console_frames_keep_timed_procedures_advancing() {
+        for threshold in [50, 500, 60_000] {
+            let elapsed = console_engine_elapsed_ms(u64::from(threshold) + 2_000, threshold);
+            assert_eq!(
+                normalize_engine_elapsed_ms(elapsed, threshold),
+                u64::from(threshold)
+            );
+            assert_eq!(console_engine_elapsed_ms(16, threshold), 16);
+        }
     }
 }

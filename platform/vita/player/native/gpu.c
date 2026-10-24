@@ -156,6 +156,12 @@ uint64_t ethornell_gpu_create(uint32_t w, uint32_t h, const uint8_t *rgba) {
     free(t);
     return 0;
   }
+  /* Plain RGBA textures own none of the optional render-target resources.
+   * Some libvita2d builds leave these malloc-backed fields uninitialized;
+   * its destructor nevertheless reads them and may free unrelated blocks. */
+  t->tex->gxm_rtgt = NULL;
+  t->tex->depth_UID = 0;
+  t->tex->palette_UID = 0;
   const uint32_t stride = vita2d_texture_get_stride(t->tex);
   uint8_t *dest = vita2d_texture_get_datap(t->tex);
   for (uint32_t y = 0; y < h; y++)

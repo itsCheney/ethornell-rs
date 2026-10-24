@@ -9,6 +9,13 @@ fn game_input_repro() {
     let bytes = manager
         .read_decoded_from_archive("system.arc", "ipl._bp")
         .unwrap();
+    #[cfg(desktop_host)]
+    let encoding = text_encoding::select(
+        &manager,
+        std::env::var("ETHORNELL_TEXT_ENCODING").ok().as_deref(),
+    );
+    #[cfg(not(desktop_host))]
+    let encoding = encoding_rs::SHIFT_JIS;
     let mut runtime = RuntimeEngine::new(
         "system.arc:ipl._bp",
         &bytes,
@@ -17,6 +24,7 @@ fn game_input_repro() {
         false,
         false,
         false,
+        encoding,
     );
     let mut script = HeadlessInputScript::from_env();
     let mut events = VecDeque::new();
