@@ -186,6 +186,23 @@ impl HostServices {
     }
 }
 
+/// WinMain leaves its loop once the root interpreter ends: the game's own
+/// exit (Sys80:6A after its "quit?" box) or the end of ipl._bp. A restart has
+/// already replaced the runtime by then, and the new one is not halted.
+fn root_interpreter_ended(
+    vm: &ethornell_vm::Vm,
+    report: Option<&ethornell_vm::VmRunReport>,
+) -> bool {
+    vm.halted
+        && report.is_some_and(|report| {
+            matches!(
+                report.stop_reason,
+                ethornell_vm::VmStopReason::InterpreterTerminated
+                    | ethornell_vm::VmStopReason::Completed
+            )
+        })
+}
+
 pub struct HostRuntime {
     runtime: RuntimeEngine,
     policy: file_policy::FilePolicy,
@@ -206,6 +223,10 @@ pub struct HostRuntime {
     closed: bool,
     audio_suspended: bool,
     vm_budget: ethornell_vm::VmResourceBudget,
+    /// The game's own icon bar, once looked for (`game_commands`).
+    icon_bar: Option<Option<crate::icon_bar::IconBar>>,
+    /// A host-clicked icon: frames left until its button is released.
+    icon_release: Option<(u32, f32, f32)>,
 }
 impl HostRuntime {
     pub fn create(config: HostConfig) -> Result<Self> {
@@ -340,6 +361,8 @@ impl HostRuntime {
             engine_frames: 0,
             closed: false,
             audio_suspended: false,
+            icon_bar: None,
+            icon_release: None,
             vm_budget: host_vm_budget(host_physical_memory()),
         })
     }
@@ -762,6 +785,14 @@ impl HostRuntime {
             .vm
             .check_resource_budget(self.vm_budget)
             .map_err(|e| EthornellError::Other(e.to_string()))?;
+        if let Some((frames, x, y)) = self.icon_release.take() {
+            if frames == 0 {
+                self.input_queue
+                    .push_back(RuntimeInputEvent::MouseRelease { x, y });
+            } else {
+                self.icon_release = Some((frames - 1, x, y));
+            }
+        }
         let audio_required = self.audio.is_some();
         let report = runtime_frontend::drive_runtime_frame_checked(
             &mut self.runtime,
@@ -807,7 +838,9 @@ impl HostRuntime {
                 text: title,
             });
         }
-        if self.runtime.api.quit_requested {
+        if self.runtime.api.quit_requested
+            || root_interpreter_ended(&self.runtime.vm, report.last_report.as_ref())
+        {
             self.close();
             return Ok(());
         }
@@ -865,6 +898,39 @@ impl HostRuntime {
         self.last_tick = None;
         self.tick_remainder_ns = 0;
         self.sync_audio()
+    }
+    /// Save, load, quick save and quick load the game's own icon bar has
+    /// enabled now, as bits `1 << (command - 1)` (`icon_bar` command ids);
+    /// 0 for a game without a known icon bar.
+    pub fn game_commands(&mut self) -> u32 {
+        if self.closed || self.paused != 0 || !self.runtime.api.host.pending.is_empty() {
+            return 0;
+        }
+        let manager = &self.runtime.api.manager;
+        let bar = *self
+            .icon_bar
+            .get_or_insert_with(|| crate::icon_bar::IconBar::detect(manager));
+        bar.map_or(0, |bar| bar.enabled(&self.runtime.vm.memory))
+    }
+    /// Clicks the icon of an enabled command, as the player would: the game
+    /// runs its own screen or confirmation. False when it is not enabled.
+    pub fn run_game_command(&mut self, command: u32) -> bool {
+        if !(1..=4).contains(&command)
+            || self.icon_release.is_some()
+            || self.game_commands() & (1 << (command - 1)) == 0
+        {
+            return false;
+        }
+        let Some((x, y)) = self.icon_bar.flatten().and_then(|bar| bar.icon(command)) else {
+            return false;
+        };
+        self.input_queue
+            .push_back(RuntimeInputEvent::MouseMove { x, y });
+        self.input_queue
+            .push_back(RuntimeInputEvent::MousePress { x, y });
+        // The game polls the button: hold it for a few frames.
+        self.icon_release = Some((5, x, y));
+        true
     }
     /// The game's own screen size, which the renderer letterboxes.
     pub fn screen_size(&self) -> (i32, i32) {
@@ -1311,6 +1377,9 @@ mod tests {
     }
     #[cfg(unix)]
     fn minimal_host(label: &str) -> (PathBuf, HostRuntime) {
+        minimal_host_running(label, &[0x17])
+    }
+    fn minimal_host_running(label: &str, code: &[u8]) -> (PathBuf, HostRuntime) {
         static N: AtomicU64 = AtomicU64::new(1);
         let root = std::env::temp_dir().join(format!(
             "ethornell-host-{}-{label}-{}",
@@ -1327,9 +1396,9 @@ mod tests {
         name[..7].copy_from_slice(b"ipl._bp");
         arc.extend_from_slice(&name);
         arc.extend_from_slice(&0u32.to_le_bytes());
-        arc.extend_from_slice(&1u32.to_le_bytes());
+        arc.extend_from_slice(&(code.len() as u32).to_le_bytes());
         arc.extend_from_slice(&[0; 24]);
-        arc.push(0x17);
+        arc.extend_from_slice(code);
         std::fs::write(resource.join("system.arc"), arc).unwrap();
         let runtime = HostRuntime::create(HostConfig {
             resource_root: resource,
@@ -1348,6 +1417,31 @@ mod tests {
         .unwrap();
         (root, runtime)
     }
+    #[test]
+    #[cfg(unix)]
+    fn the_games_own_exit_closes_the_host() {
+        // Wonderful Everyday answers its "quit?" box with Sys80:6A.
+        let (root, mut host) = minimal_host_running("exit", &[0x80, 0x6a]);
+        let report = crate::runtime_frontend::drive_runtime_frame_checked(
+            &mut host.runtime,
+            &mut VecDeque::new(),
+            &mut None,
+            RuntimeFramePacing,
+            16,
+            16,
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert!(root_interpreter_ended(
+            &host.runtime.vm,
+            report.last_report.as_ref()
+        ));
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     #[cfg(unix)]
     fn launcher_must_be_a_packed_executable_in_the_game_folder() {
