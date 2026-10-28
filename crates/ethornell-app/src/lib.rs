@@ -237,6 +237,14 @@ fn confirmed_native_profile(
             (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
         })
     }
+    // BGI 1.678 (Amairo Chocolata 3) keeps native text in UTF-8 after
+    // 81:00(1) and has the same 81:21/D8/DA calls; its bytecode is
+    // recognisable on its own.
+    if ethornell_script::parse_bp_program(None, bootstrap).dialect
+        == ethornell_script::BpDialect::V1678
+    {
+        return ethornell_vm::NativeAbiProfile::Amachoco;
+    }
     if bootstrap.len() == 10176 && fingerprint(bootstrap) == CONFIRMED_BOOTSTRAP_FNV {
         if let Ok(title) = manager.read_decoded_from_archive("sysprg.arc", "title._bp") {
             if title.len() == CONFIRMED_TITLE_LEN && fingerprint(&title) == CONFIRMED_TITLE_FNV {
@@ -774,7 +782,10 @@ struct RuntimeTraceApi {
     window_mode: i32,
     screen_width: i32,
     screen_height: i32,
-    display_mode_sizes: [Option<(i32, i32)>; 8],
+    /// dword_506B8C / dword_506BAC; BGI 1.678 has 16 slots
+    /// (dword_548288 / dword_5482C8), earlier builds 8.
+    display_mode_sizes: [Option<(i32, i32)>; 16],
+    display_mode_count: usize,
     /// dword_506B88 / dword_518614: the Sys80:60 size index and pixel mode.
     display_size_index: i32,
     /// GetAdapterDisplayMode width/height (dword_5177C0/C4); 0 when unknown.
@@ -1277,7 +1288,16 @@ impl RuntimeTraceApi {
                 Some((1024, 600)),
                 Some((1280, 720)),
                 Some((1920, 1080)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             ],
+            display_mode_count: 8,
             display_size_index: 2,
             desktop_display_size: (0, 0),
             display_adapter_description: String::new(),
@@ -3726,6 +3746,14 @@ impl RuntimeTraceApi {
             2 => PresentationScale::Center,
             _ => PresentationScale::Fit,
         }
+    }
+
+    /// BGI 1.678 doubled the display-mode table (sub_4BAA40).
+    pub(crate) fn configure_for_dialect(&mut self, dialect: ethornell_script::BpDialect) {
+        self.display_mode_count = match dialect {
+            ethornell_script::BpDialect::Legacy => 8,
+            ethornell_script::BpDialect::V1678 => 16,
+        };
     }
 
     fn display_mode_size(&self) -> (i32, i32) {
@@ -9514,6 +9542,7 @@ impl RuntimeEngine {
             vm,
             api: {
                 let mut api = RuntimeTraceApi::new_with_native_root(manager, native_root);
+                api.configure_for_dialect(program.dialect);
                 api.native_dialog_presentation = native_dialog_presentation;
                 api
             },
@@ -10269,6 +10298,7 @@ mod input_tests {
             labels: std::sync::Arc::new(std::collections::HashMap::new()),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
 
@@ -10321,6 +10351,7 @@ mod input_tests {
                 labels: std::sync::Arc::new(std::collections::HashMap::new()),
                 warnings: Vec::new(),
                 module_size: 0,
+                dialect: Default::default(),
                 code: std::sync::Arc::new(Vec::new()),
             };
             let mut vm = ethornell_vm::Vm::new();
@@ -10381,6 +10412,7 @@ mod input_tests {
             labels: std::sync::Arc::new(std::collections::HashMap::new()),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = ethornell_vm::Vm::new();
@@ -17560,6 +17592,7 @@ mod input_tests {
             labels: std::sync::Arc::new(std::collections::HashMap::new()),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = ethornell_vm::Vm::new();
@@ -20708,6 +20741,7 @@ fn empty_bp_program(name: String) -> ethornell_script::BpProgram {
         labels: std::sync::Arc::new(labels),
         warnings: vec!["generated empty program after runtime load failure".into()],
         module_size: 0,
+        dialect: Default::default(),
         code: std::sync::Arc::new(Vec::new()),
     }
 }
@@ -22617,8 +22651,12 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         tracing::info!(width, height, explicit, "native window size requested");
     }
 
+    fn windowed_client_size(&self) -> (i32, i32) {
+        self.windowed_client_size
+    }
+
     fn register_display_mode(&mut self, index: usize, width: i32, height: i32) {
-        if let Some(slot) = self.display_mode_sizes.get_mut(index) {
+        if let Some(slot) = self.display_mode_sizes[..self.display_mode_count].get_mut(index) {
             *slot = Some((width, height));
         }
     }
@@ -24051,7 +24089,8 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             }
             (0x80, 0x60) => {
                 // sub_489DD0 -> sub_461670: pops fullscreen, pixel mode
-                // (< 2) and size index (< 8), both checked unsigned.
+                // (< 2) and size index (< 8, < 16 in 1.678), both checked
+                // unsigned.
                 let fullscreen = pop_int_value(stack).unwrap_or_default() != 0;
                 let pixel_mode = pop_int_value(stack).unwrap_or_default();
                 let mode = pop_int_value(stack).unwrap_or_default();
@@ -24060,7 +24099,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                         "無効なピクセルモードが設定されました".into(),
                     ));
                 }
-                if !(0..8).contains(&mode) {
+                if !(0..self.display_mode_count as i32).contains(&mode) {
                     return Err(ethornell_vm::VmError::Runtime(
                         "無効なスクリーンサイズが設定されました".into(),
                     ));

@@ -24,6 +24,18 @@ pub enum ScriptFormat {
     Unknown,
 }
 
+/// The bytecode generation a module was compiled for. BGI 1.678 (Amairo
+/// Chocolata 3) adds 31 opcodes (varint immediates, fused frame loads,
+/// compare-and-branch), gives jc an inline target and turns 0x7F into an
+/// opcode group. Its compiler starts every module with 0x12 (frame alloc);
+/// older ones start with 0x10 (load_base).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub enum BpDialect {
+    #[default]
+    Legacy,
+    V1678,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum BpOpcode {
     Known { code: u8, name: &'static str },
@@ -158,6 +170,7 @@ pub struct BpProgram {
     /// bytes the module occupies in a thread's code region, including data
     /// that follows the last instruction. Zero when unknown.
     pub module_size: u32,
+    pub dialect: BpDialect,
     /// The bytes the module occupies in a thread's code region (the image
     /// without its BP header, as sub_4450B0 copies it); code offset 0 is the
     /// first instruction.
@@ -878,6 +891,11 @@ pub fn parse_bp_program(script_name: Option<String>, buf: &[u8]) -> BpProgram {
         range.end
     };
     let code = Arc::new(buf[range.start..module_end].to_vec());
+    let dialect = if range.end > range.start && buf[range.start] == 0x12 {
+        BpDialect::V1678
+    } else {
+        BpDialect::Legacy
+    };
     let mut cursor = Cursor::new(code.as_slice());
     let mut instructions = Vec::new();
     let mut labels = HashMap::new();
@@ -897,7 +915,18 @@ pub fn parse_bp_program(script_name: Option<String>, buf: &[u8]) -> BpProgram {
         let mut known_call = None;
         let mut opcode_name_override = None;
 
+        let v1678 = dialect == BpDialect::V1678
+            && parse_v1678_operands(
+                opcode_byte,
+                offset,
+                &mut cursor,
+                &mut raw_len,
+                &mut operands,
+                &mut warning,
+                &mut opcode_name_override,
+            );
         match opcode_byte {
+            _ if v1678 => {}
             0x00 | 0x08 | 0x09 | 0x0a => {
                 if let Some(value) = read_u8_operand(&mut cursor, &mut raw_len, &mut warning) {
                     operands.push(BpOperand::U8(value));
@@ -1029,7 +1058,236 @@ pub fn parse_bp_program(script_name: Option<String>, buf: &[u8]) -> BpProgram {
         labels: Arc::new(labels),
         warnings,
         module_size,
+        dialect,
         code,
+    }
+}
+
+/// The operands of the opcodes that BGI 1.678 added or changed; false for
+/// the ones it decodes like the older interpreters.
+fn push_varint(
+    cursor: &mut Cursor<&[u8]>,
+    low_bits: u32,
+    raw_len: &mut usize,
+    operands: &mut Vec<BpOperand>,
+    warning: &mut Option<String>,
+) {
+    match read_bp_varint(cursor, low_bits) {
+        Some((low, value, len)) => {
+            *raw_len += len;
+            if low_bits != 0 {
+                operands.push(BpOperand::U8(low as u8));
+            }
+            operands.push(BpOperand::I32(value));
+        }
+        None => *warning = Some("truncated varint operand".into()),
+    }
+}
+
+fn parse_v1678_operands(
+    opcode: u8,
+    offset: u64,
+    cursor: &mut Cursor<&[u8]>,
+    raw_len: &mut usize,
+    operands: &mut Vec<BpOperand>,
+    warning: &mut Option<String>,
+    name: &mut Option<&'static str>,
+) -> bool {
+    let relative = |rel: u16| (offset as i64 + rel as i16 as i64) as u32;
+    *name = Some(match opcode {
+        // sub_4D0820: a count byte below 0x80 pushes count + 1 varints; 0x80
+        // | n pushes one i8, i16, u32 or (low half of a) u64.
+        0x03 => {
+            let Some(tag) = read_u8_operand(cursor, raw_len, warning) else {
+                return true;
+            };
+            if tag < 0x80 {
+                for _ in 0..=tag {
+                    push_varint(cursor, 0, raw_len, operands, warning);
+                }
+            } else if tag & 0x7c == 0 {
+                let width = 1usize << (tag & 3);
+                let mut bytes = [0u8; 8];
+                if cursor.read_exact(&mut bytes[..width]).is_err() {
+                    *warning = Some("truncated immediate".into());
+                    return true;
+                }
+                *raw_len += width;
+                let value = match width {
+                    1 => bytes[0] as i8 as i32,
+                    2 => i16::from_le_bytes([bytes[0], bytes[1]]) as i32,
+                    _ => i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                };
+                operands.push(BpOperand::I32(value));
+            }
+            "push_imm"
+        }
+        0x0d => {
+            push_varint(cursor, 2, raw_len, operands, warning);
+            "store_imm"
+        }
+        0x0e => {
+            if let Some(slot) = read_u16_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U16(slot));
+            }
+            push_varint(cursor, 2, raw_len, operands, warning);
+            "store_frame_imm"
+        }
+        0x0f | 0x19 | 0x1d | 0x1e => {
+            if let Some(slot) = read_u16_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U16(slot));
+            }
+            match opcode {
+                0x0f => "store_frame",
+                0x19 => "load_frame",
+                0x1d => "mul_frame",
+                _ => "div_by_frame",
+            }
+        }
+        0x12 => {
+            push_varint(cursor, 0, raw_len, operands, warning);
+            "frame_alloc"
+        }
+        0x13 => {
+            if let Some(rel) = read_u16_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::Offset(relative(rel)));
+            }
+            "jmp_rel"
+        }
+        // sub_4D0230: bit 3 of the condition byte carries the target inline.
+        0x15 => {
+            let Some(flags) = read_u8_operand(cursor, raw_len, warning) else {
+                return true;
+            };
+            operands.push(BpOperand::U8(flags));
+            if flags & 8 != 0
+                && let Some(rel) = read_u16_operand(cursor, raw_len, warning)
+            {
+                operands.push(BpOperand::Offset(relative(rel)));
+            }
+            "jc"
+        }
+        0x18 => {
+            if let Some(address) = read_u32_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U32(address));
+            }
+            "load_global"
+        }
+        0x1a | 0x1b => {
+            if let Some(slot) = read_u16_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U16(slot));
+            }
+            push_varint(cursor, 0, raw_len, operands, warning);
+            if opcode == 0x1a {
+                "load_frame_add"
+            } else {
+                "load_frame_madd"
+            }
+        }
+        0x1c => {
+            if let Some(slot) = read_u16_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U16(slot));
+            }
+            if let Some(shift) = read_u8_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U8(shift));
+            }
+            "load_frame_shift"
+        }
+        0x1f => {
+            push_varint(cursor, 2, raw_len, operands, warning);
+            "load_indexed"
+        }
+        0x2c..=0x2f => {
+            push_varint(cursor, 0, raw_len, operands, warning);
+            ["add_imm", "mul_imm", "madd_imm", "div_imm"][(opcode - 0x2c) as usize]
+        }
+        0x36 => {
+            if let Some(kind) = read_u8_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U8(kind));
+            }
+            push_varint(cursor, 0, raw_len, operands, warning);
+            "cmp_imm"
+        }
+        0x37 | 0x3b => {
+            if let Some(kind) = read_u8_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U8(kind));
+            }
+            if let Some(rel) = read_u16_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::Offset(relative(rel)));
+            }
+            if opcode == 0x37 {
+                push_varint(cursor, 0, raw_len, operands, warning);
+                "jcmp_imm"
+            } else {
+                "jcmp"
+            }
+        }
+        0x3c | 0x7f => {
+            if let Some(value) = read_u8_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U8(value));
+            }
+            if opcode == 0x3c { "shift_imm" } else { "ext7f" }
+        }
+        // sub_4CD780: count + 1 frame loads in a row.
+        0xe3 => {
+            let Some(count) = read_u8_operand(cursor, raw_len, warning) else {
+                return true;
+            };
+            for _ in 0..=count {
+                if let Some(slot) = read_u16_operand(cursor, raw_len, warning) {
+                    operands.push(BpOperand::U16(slot));
+                }
+            }
+            "load_frames"
+        }
+        // sub_4CD6D0..sub_4CD4C0: a frame slot and a sized varint.
+        0xe4..=0xe7 => {
+            if let Some(slot) = read_u16_operand(cursor, raw_len, warning) {
+                operands.push(BpOperand::U16(slot));
+            }
+            push_varint(cursor, 2, raw_len, operands, warning);
+            match opcode {
+                0xe4 => "load_frame_field",
+                0xe5 => "load_frame_scaled",
+                0xe6 => "store_frame_add",
+                _ => "store_frame_madd",
+            }
+        }
+        0x45 => "rotate3",
+        0x46 => "lerp_ratio",
+        0x47 => "lerp",
+        0x73 => "drop",
+        _ => return false,
+    });
+    true
+}
+
+/// sub_4950B0: a signed LEB128 value. With `low_bits` set, that many bits
+/// are split off the bottom as soon as they have been read (a store width);
+/// the rest is shifted down arithmetically. Returns (low bits, value, length).
+pub fn read_bp_varint(cursor: &mut Cursor<&[u8]>, low_bits: u32) -> Option<(u32, i32, usize)> {
+    let mut result = 0u32;
+    let mut shift = 0u32;
+    let mut pending = low_bits;
+    let mut low = 0;
+    let mut len = 0;
+    loop {
+        let byte = cursor.read_u8().ok()?;
+        len += 1;
+        result |= u32::from(byte & 0x7f).wrapping_shl(shift);
+        shift += 7;
+        if pending != 0 && pending <= shift {
+            low = result & (u32::MAX >> (32 - pending));
+            result = ((result as i32) >> pending) as u32;
+            shift -= pending;
+            pending = 0;
+        }
+        if byte & 0x80 == 0 {
+            if byte & 0x40 != 0 {
+                result |= if shift < 32 { u32::MAX << shift } else { 0 };
+            }
+            return Some((low, result as i32, len));
+        }
     }
 }
 

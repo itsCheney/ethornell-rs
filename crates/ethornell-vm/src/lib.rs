@@ -1,5 +1,5 @@
 use ethornell_script::{
-    BpInstruction, BpOpcode, BpOperand, BpProgram,
+    BpDialect, BpInstruction, BpOpcode, BpOperand, BpProgram,
     calls::{known_call_arg_count, known_call_returns_value, known_call_stack_output_count},
     native_abi,
 };
@@ -68,6 +68,34 @@ pub(crate) const FRAME_SEGMENT: u32 = 0x0800_0000;
 /// Segment 1: the thread's code region (BP modules appended, string
 /// literals and function addresses point into it).
 pub(crate) const CODE_SEGMENT: u32 = 0x0400_0000;
+/// BGI 1.678 (sub_4E9CC0) moved the segment number to the top nibble: the
+/// frames are `0x2000_0000 | (base - offset)`, the code region 0x1000_0000.
+/// Neither overlaps the 1.622 tags or the heap (0x10 << 26 and up), so both
+/// decode everywhere; only the encoding follows the program's dialect.
+pub(crate) const FRAME_SEGMENT_1678: u32 = 0x2000_0000;
+pub(crate) const CODE_SEGMENT_1678: u32 = 0x1000_0000;
+
+/// The data-region offset of a frame pointer in either encoding.
+pub(crate) fn frame_segment_offset(ptr: u32) -> Option<u32> {
+    if ptr >> 26 == 2 {
+        Some(ptr & 0x03FF_FFFF)
+    } else if ptr >> 28 == 2 {
+        Some(ptr & 0x0FFF_FFFF)
+    } else {
+        None
+    }
+}
+
+/// The code-region offset of a code pointer in either encoding.
+pub(crate) fn code_segment_offset(ptr: u32) -> Option<u32> {
+    if ptr >> 26 == 1 {
+        Some(ptr & 0x03FF_FFFF)
+    } else if ptr >> 28 == 1 {
+        Some(ptr & 0x0FFF_FFFF)
+    } else {
+        None
+    }
+}
 /// Where the code region sits in the thread's local window (after the data
 /// region), and its largest size.
 const CODE_WINDOW_OFFSET: u32 = 0x0010_0000;
@@ -733,6 +761,11 @@ pub trait SysApi {
     }
 
     fn configure_screen_size(&mut self, _width: i32, _height: i32) {}
+
+    /// The windowed client size Sys81:64 last stored.
+    fn windowed_client_size(&self) -> (i32, i32) {
+        (0, 0)
+    }
 
     fn register_display_mode(&mut self, _index: usize, _width: i32, _height: i32) {}
 
@@ -2310,6 +2343,7 @@ fn placeholder_loaded_program(
         labels: std::sync::Arc::new(labels),
         warnings: vec![warning.into()],
         module_size: 0,
+        dialect: Default::default(),
         code: std::sync::Arc::new(Vec::new()),
     }
 }
@@ -2317,6 +2351,9 @@ fn placeholder_loaded_program(
 #[derive(Debug, Default)]
 pub struct Vm {
     native_abi_profile: NativeAbiProfile,
+    /// The bytecode revision of the thread's root program; it picks the
+    /// pointer tags opcodes push.
+    dialect: BpDialect,
     trace_id: u64,
     pending_host_request: Option<host_request::PendingHostRequest>,
     ready_host_response: Option<HostResponse>,
@@ -2688,6 +2725,7 @@ impl Vm {
         self.operand_slots.fill(Value::Int(0));
         self.operand_slots_synced_len = 0;
         self.programs.clear();
+        self.dialect = program.dialect;
         self.programs.push(program.clone());
         self.program_code_bases.clear();
         self.program_code_bases.push(0);
@@ -3144,6 +3182,11 @@ impl Vm {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: self
+                .programs
+                .get(old_program)
+                .map(|program| program.dialect)
+                .unwrap_or_default(),
             code: std::sync::Arc::new(Vec::new()),
         });
         self.current_program = self.programs.len() - 1;
@@ -3168,10 +3211,13 @@ impl Vm {
     {
         let code = instruction.opcode.code();
         let mut next_pc = self.pc + 1;
+        let v1678 = self.programs[program_index].dialect == BpDialect::V1678
+            && self.dispatch_v1678(program_index, instruction, &mut next_pc)?;
         // Canonical bytecodes dispatch by their numeric opcode. Names remain
         // diagnostic metadata; legacy synthetic aliases below keep their
         // compatibility handling without putting string matches on core ops.
         match instruction.opcode {
+            _ if v1678 => {}
             BpOpcode::Known { code: 0x00, .. } => {
                 self.push_value(Value::Int(read_op_i32(instruction)));
             }
@@ -3179,9 +3225,7 @@ impl Vm {
                 self.push_value(Value::Int(read_op_i32(instruction)));
             }
             BpOpcode::Known { code: 0x04, .. } => {
-                self.push_value(Value::Ptr(
-                    FRAME_SEGMENT | self.mem_ptr.saturating_sub(read_op_u32(instruction)),
-                ));
+                self.push_value(Value::Ptr(self.frame_ptr(read_op_u32(instruction))));
             }
             BpOpcode::Known { code: 0x05, .. } => {
                 if let Some(BpOperand::String(text)) = instruction.operands.first() {
@@ -3203,7 +3247,7 @@ impl Vm {
                         });
                     if let Some(target) = literal {
                         let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
-                        self.push_value(Value::Ptr(CODE_SEGMENT | base.wrapping_add(target - start)));
+                        self.push_value(Value::Ptr(self.code_tag() | base.wrapping_add(target - start)));
                     } else {
                         self.push_value(Value::Str(text.clone()));
                     }
@@ -3212,7 +3256,7 @@ impl Vm {
                     let program = &self.programs[program_index];
                     let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
                     let address = base.wrapping_add(offset.wrapping_sub(Self::program_parser_code_start(program)));
-                    self.push_value(Value::Ptr(CODE_SEGMENT | address));
+                    self.push_value(Value::Ptr(self.code_tag() | address));
                 }
             }
             BpOpcode::Known { code: 0x06, .. } => {
@@ -3227,39 +3271,8 @@ impl Vm {
                 self.push_value(Value::Int(self.mem_ptr as i32));
             }
             BpOpcode::Known { code: 0x11, .. } => {
-                let previous = self.mem_ptr;
                 let next = self.pop_int()? as u32;
-                // sub_4738A0: the new frame pointer must stay below the data
-                // region limit.
-                if next >= self.thread.data_region_size() {
-                    return Err(VmError::Runtime(format!(
-                        "store_base: SP 0x{next:08X} outside the {}-byte data region",
-                        self.thread.data_region_size()
-                    )));
-                }
-                if next > previous {
-                    // The target leaves the new frame untouched (sub_4738A0).
-                    // Clearing it is kept on purpose: some scripts read frame
-                    // slots that the original had filled by a step the
-                    // portable runtime does not reproduce yet (the save-slot
-                    // excerpt line), and stale bytes there decode as garbage
-                    // text. See src/README.md "Open fidelity items".
-                    let size = (next - previous) as usize;
-                    let ptr = FRAME_SEGMENT | previous;
-                    let range = self.resolve_write_range(ptr, size)?;
-                    self.memory[range].fill(0);
-                    self.clear_shadow_values(ptr, size);
-                }
-                tracing::trace!(
-                    target: "vm_frames",
-                    program = self.program_name(program_index),
-                    pc = self.pc,
-                    offset = format_args!("0x{:08X}", instruction.offset),
-                    previous = format_args!("0x{previous:08X}"),
-                    next = format_args!("0x{next:08X}"),
-                    "VM store_base"
-                );
-                self.mem_ptr = next;
+                self.set_frame_base(program_index, instruction, next)?;
             }
             BpOpcode::Known { code: 0x08, .. } => {
                 let width = read_op_u8(instruction);
@@ -3406,7 +3419,7 @@ impl Vm {
                         _ => ("<non-function>", 0),
                     };
                     let command = self
-                        .read_int(FRAME_SEGMENT | self.mem_ptr.saturating_sub(4), 2)
+                        .read_int(self.frame_ptr(4), 2)
                         .unwrap_or_default();
                     let scenario_offset = self.read_int(314_072 + 416, 2).unwrap_or_default();
                     tracing::warn!(
@@ -4356,8 +4369,8 @@ impl Vm {
                                 value as u32,
                             )?;
                         }
-                        if self.native_abi_profile==NativeAbiProfile::Amachoco && api.input_gate_diagnostics_enabled() && state_buffer==(FRAME_SEGMENT|self.mem_ptr.wrapping_sub(0x64)) {
-                            let base=FRAME_SEGMENT|self.mem_ptr;
+                        if self.native_abi_profile==NativeAbiProfile::Amachoco && api.input_gate_diagnostics_enabled() && state_buffer==(self.frame_tag()|self.mem_ptr.wrapping_sub(0x64)) {
+                            let base=self.frame_tag()|self.mem_ptr;
                             let read=|offset:u32|self.read_int(base.wrapping_sub(offset),2).unwrap_or(u32::MAX);
                             let event=read(0x70);
                             if event!=0 {api.record_input_gate([self.pc as u32,self.mem_ptr,event,read(0x6c),read(0x68),read(0x44),read(0x40),state[0]as u32,self.read_int(1092,2).unwrap_or(u32::MAX)]);}
@@ -4552,6 +4565,13 @@ impl Vm {
                         }
                     }
                     Value::None
+                } else if (code, id) == (0x91, 0x09)
+                    && self.native_abi_profile == NativeAbiProfile::Amachoco
+                {
+                    // sub_4AFFC0 stores a 0/1 flag (dword_558368) that no
+                    // portable path reads yet; anything else fails.
+                    let mode = self.pop_int()?;
+                    Value::Int(i32::from(mode as u32 <= 1))
                 } else if (code, id) == (0x91, 0x38) {
                     // sub_481A90 pops parameter number and object before
                     // converting the first script argument to a writable BP
@@ -5777,6 +5797,35 @@ impl Vm {
                         Err(status) => status,
                     };
                     Some(Value::Int(status))
+                } else if (code, id) == (0xb0, 0xc5)
+                    && self.native_abi_profile == NativeAbiProfile::Amachoco
+                {
+                    // sub_47C590 enumerates the font families of a charset:
+                    // with a null buffer it returns the bytes the list needs,
+                    // otherwise it writes the names one after another (each
+                    // NUL-terminated) and returns their count. The host maps
+                    // every face to its own fonts, so offer the faces the
+                    // scripts ask for by name.
+                    let charset = self.pop_int()?;
+                    let buffer = self.pop_ptr()?;
+                    let faces: &[&str] = match charset {
+                        128 => &["ＭＳ ゴシック", "メイリオ"],
+                        134 => &["微软雅黑"],
+                        136 => &["微軟正黑體"],
+                        _ => &["MS Gothic", "Meiryo"],
+                    };
+                    if buffer == 0 {
+                        Some(Value::Int(
+                            faces.iter().map(|face| face.len() as i32 + 1).sum(),
+                        ))
+                    } else {
+                        let mut cursor = buffer;
+                        for face in faces {
+                            self.write_c_string_raw(cursor, face)?;
+                            cursor = cursor.wrapping_add(face.len() as u32 + 1);
+                        }
+                        Some(Value::Int(faces.len() as i32))
+                    }
                 } else if (code, id) == (0xc0, 0xf0) {
                     // sub_477840 -> sub_4066C0 loads a BWEF resource and writes
                     // count pairs {base + offset, stride}. Script order is
@@ -6641,7 +6690,7 @@ impl Vm {
         for index in 0..args.len() {
             // Literals are code pointers (segment 1): any one the handler
             // does not take as a raw pointer is text for the host.
-            let literal = matches!(args[index], Value::Ptr(pointer) if pointer >> 26 == 1)
+            let literal = matches!(args[index], Value::Ptr(pointer) if code_segment_offset(pointer).is_some())
                 && !pointers.contains(&index);
             if !strings.contains(&index) && !literal {
                 continue;
@@ -7384,7 +7433,7 @@ impl Vm {
             self.program_name(program_index),
             self.code_offset_of(program_index, parser_offset),
             opcode,
-            FRAME_SEGMENT | self.mem_ptr,
+            self.frame_tag() | self.mem_ptr,
         );
         let frames = self.call_stack.clone();
         for &(program, pc, _) in frames.iter().rev() {
@@ -7429,14 +7478,325 @@ impl Vm {
         if self.mem_ptr.wrapping_add(4) >= self.data_region_limit() {
             return Err(VmError::Runtime("スタック領域が不足しています".into()));
         }
-        self.write_int(FRAME_SEGMENT | self.mem_ptr, 2, return_offset)?;
+        self.write_int(self.frame_tag() | self.mem_ptr, 2, return_offset)?;
         self.mem_ptr = self.mem_ptr.saturating_add(4);
         Ok(())
     }
 
+    /// BGI 1.678's new and changed opcodes (`parse_v1678_operands` gives
+    /// their operands); false for the ones it shares with 1.622. Frame slots
+    /// are u16s with the offset below the base in the low 14 bits and the
+    /// width in the top two; sized varints carry the width in their low bits.
+    fn dispatch_v1678(
+        &mut self,
+        program_index: usize,
+        instruction: &BpInstruction,
+        next_pc: &mut usize,
+    ) -> VmResult<bool> {
+        let operand = |index: usize| -> i32 {
+            match instruction.operands.get(index) {
+                Some(BpOperand::U8(value)) => i32::from(*value),
+                Some(BpOperand::U16(value)) => i32::from(*value),
+                Some(BpOperand::U32(value) | BpOperand::Offset(value)) => *value as i32,
+                Some(BpOperand::I32(value)) => *value,
+                _ => 0,
+            }
+        };
+        let sized = |size: i32| -> u8 {
+            match size {
+                2 => 2,
+                1 => 1,
+                _ => 0,
+            }
+        };
+        let slot = |index: usize| -> (u32, u8) {
+            let slot = operand(index) as u32;
+            (slot & 0x3FFF, sized((slot >> 14) as i32))
+        };
+        match instruction.opcode.code() {
+            0x03 => {
+                for value in instruction.operands.iter() {
+                    if let BpOperand::I32(value) = value {
+                        self.push_value(Value::Int(*value));
+                    }
+                }
+            }
+            0x0d => {
+                let ptr = self.pop_ptr()?;
+                self.write_int(ptr, sized(operand(0)), operand(1) as u32)?;
+            }
+            0x0e => {
+                // sub_4D04F0 takes the whole u16 as the offset.
+                let ptr = self.frame_ptr(operand(0) as u32);
+                self.write_int(ptr, sized(operand(1)), operand(2) as u32)?;
+            }
+            0x0f => {
+                let (offset, width) = slot(0);
+                let value = self.pop_value()?;
+                self.write_value(self.frame_ptr(offset), width, &value)?;
+            }
+            0x12 => {
+                let next = self.mem_ptr.wrapping_add(operand(0) as u32);
+                self.set_frame_base(program_index, instruction, next)?;
+            }
+            0x13 => {
+                *next_pc = self.jump_target_index(program_index, operand(0) as u32)?;
+            }
+            0x15 => {
+                let flags = operand(0) as u8;
+                let target = if flags & 8 != 0 {
+                    (program_index, operand(1) as u32)
+                } else {
+                    let dest = self.pop_int()? as u32;
+                    self.resolve_code_target(program_index, dest)
+                };
+                let value = self.pop_int()?;
+                let take = match flags & 7 {
+                    0 => value != 0,
+                    1 => value == 0,
+                    2 => value > 0,
+                    3 => value >= 0,
+                    4 => value <= 0,
+                    5 => value < 0,
+                    _ => true,
+                };
+                if take {
+                    self.current_program = target.0;
+                    *next_pc = self.jump_target_index(target.0, target.1)?;
+                }
+            }
+            0x18 => {
+                let address = operand(0) as u32;
+                let value =
+                    self.read_value(address & 0x3FFF_FFFF, sized((address >> 30) as i32))?;
+                self.push_value(value);
+            }
+            0x19 => {
+                let (offset, width) = slot(0);
+                let value = self.read_value(self.frame_ptr(offset), width)?;
+                self.push_value(value);
+            }
+            0x1a => {
+                let value = self.frame_slot_int(slot(0))?;
+                self.push_value(Value::Int(value.wrapping_add(operand(1))));
+            }
+            0x1b => {
+                let value = self.frame_slot_int(slot(0))?;
+                let addend = self.pop_numeric()?;
+                self.push_value(Value::Int(
+                    value.wrapping_mul(operand(1)).wrapping_add(addend),
+                ));
+            }
+            0x1c => {
+                let value = self.frame_slot_int(slot(0))?;
+                self.push_value(Value::Int(bgi_shift(value, operand(1) as u8 as i8)));
+            }
+            0x1d => {
+                let value = self.frame_slot_int(slot(0))?;
+                let factor = self.pop_numeric()?;
+                self.push_value(Value::Int(value.wrapping_mul(factor)));
+            }
+            0x1e => {
+                let divisor = self.frame_slot_int(slot(0))?;
+                let dividend = self.pop_numeric()?;
+                self.push_value(Value::Int(bgi_div(dividend, divisor)));
+            }
+            0x1f => {
+                let ptr = self.pop_ptr()?;
+                let value =
+                    self.read_value(ptr.wrapping_add(operand(1) as u32), sized(operand(0)))?;
+                self.push_value(value);
+            }
+            0x2c..=0x2f => {
+                let value = self.pop_numeric()?;
+                let imm = operand(0);
+                let result = match instruction.opcode.code() {
+                    0x2c => value.wrapping_add(imm),
+                    0x2d => value.wrapping_mul(imm),
+                    // sub_4D0A90: x * imm + the value below it.
+                    0x2e => self.pop_numeric()?.wrapping_add(value.wrapping_mul(imm)),
+                    _ => bgi_div(value, imm),
+                };
+                self.push_value(Value::Int(result));
+            }
+            0x36 => {
+                let left = self.pop_value()?;
+                let result = self.bgi_compare(operand(0) as u8, left, Value::Int(operand(1)))?;
+                self.push_value(Value::Int(result));
+            }
+            0x37 | 0x3b => {
+                let flags = operand(0) as u8;
+                let (left, right) = if instruction.opcode.code() == 0x37 {
+                    (self.pop_value()?, Value::Int(operand(2)))
+                } else {
+                    let right = self.pop_value()?;
+                    (self.pop_value()?, right)
+                };
+                // Bit 7 set jumps when the comparison holds, clear when not.
+                let holds = self.bgi_compare(flags & 0xF, left, right)? != 0;
+                if holds == (flags & 0x80 != 0) {
+                    *next_pc = self.jump_target_index(program_index, operand(1) as u32)?;
+                }
+            }
+            0x3c => {
+                let value = self.pop_numeric()?;
+                self.push_value(Value::Int(bgi_shift(value, operand(0) as u8 as i8)));
+            }
+            0x73 => {
+                self.pop_value()?;
+            }
+            0xe3 => {
+                for index in 0..instruction.operands.len() {
+                    let (offset, width) = slot(index);
+                    let value = self.read_value(self.frame_ptr(offset), width)?;
+                    self.push_value(value);
+                }
+            }
+            0xe4 => {
+                let base = self.frame_slot_int(slot(0))? as u32;
+                let value =
+                    self.read_value(base.wrapping_add(operand(2) as u32), sized(operand(1)))?;
+                self.push_value(value);
+            }
+            0xe5 => {
+                let index = self.pop_numeric()?;
+                let scaled = self.frame_slot_int(slot(0))?.wrapping_mul(operand(2));
+                let value =
+                    self.read_value(scaled.wrapping_add(index) as u32, sized(operand(1)))?;
+                self.push_value(value);
+            }
+            0xe6 => {
+                let dst = self.pop_ptr()?;
+                let (offset, width) = slot(0);
+                let value = self.read_value(self.frame_ptr(offset), width)?;
+                if operand(2) == 0 {
+                    // A plain copy keeps a string or pointer value typed.
+                    self.write_value(dst, sized(operand(1)), &value)?;
+                } else {
+                    let value = self
+                        .value_as_numeric_operand(value)?
+                        .wrapping_add(operand(2));
+                    self.write_int(dst, sized(operand(1)), value as u32)?;
+                }
+            }
+            0xe7 => {
+                let addend = self.pop_numeric()?;
+                let dst = self.pop_ptr()?;
+                let value = self
+                    .frame_slot_int(slot(0))?
+                    .wrapping_mul(operand(2))
+                    .wrapping_add(addend);
+                self.write_int(dst, sized(operand(1)), value as u32)?;
+            }
+            0x45 | 0x46 | 0x47 | 0x7f => {
+                return Err(VmError::Runtime(format!(
+                    "BGI 1.678 opcode 0x{:02X} at 0x{:08X} in {} is not implemented",
+                    instruction.opcode.code(),
+                    instruction.offset,
+                    self.program_name(program_index)
+                )));
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn frame_slot_int(&mut self, (offset, width): (u32, u8)) -> VmResult<i32> {
+        let value = self.read_value(self.frame_ptr(offset), width)?;
+        self.value_as_numeric_operand(value)
+    }
+
+    fn pop_numeric(&mut self) -> VmResult<i32> {
+        let value = self.pop_value()?;
+        self.value_as_numeric_operand(value)
+    }
+
+    /// sub_4D0930: conditions 0..5 compare (signed), 6 and 7 give the
+    /// bitwise and / or, 8 and 9 the logical ones; anything else is 0.
+    fn bgi_compare(&mut self, condition: u8, left: Value, right: Value) -> VmResult<i32> {
+        if condition <= 1 {
+            let equal = self.values_equal(&left, &right)?;
+            return Ok((equal == (condition == 0)) as i32);
+        }
+        let left = self.value_as_numeric_operand(left)?;
+        let right = self.value_as_numeric_operand(right)?;
+        Ok(match condition {
+            2 => (left < right) as i32,
+            3 => (left <= right) as i32,
+            4 => (left >= right) as i32,
+            5 => (left > right) as i32,
+            6 => left & right,
+            7 => left | right,
+            8 => (left != 0 && right != 0) as i32,
+            9 => (left != 0 || right != 0) as i32,
+            _ => 0,
+        })
+    }
+
+    /// sub_4738A0 (0x11 store_base), also BGI 1.678's 0x12 frame_alloc.
+    fn set_frame_base(
+        &mut self,
+        program_index: usize,
+        instruction: &BpInstruction,
+        next: u32,
+    ) -> VmResult<()> {
+        let previous = self.mem_ptr;
+        // sub_4738A0: the new frame pointer must stay below the data
+        // region limit.
+        if next >= self.thread.data_region_size() {
+            return Err(VmError::Runtime(format!(
+                "store_base: SP 0x{next:08X} outside the {}-byte data region",
+                self.thread.data_region_size()
+            )));
+        }
+        if next > previous {
+            // The target leaves the new frame untouched (sub_4738A0).
+            // Clearing it is kept on purpose: some scripts read frame
+            // slots that the original had filled by a step the
+            // portable runtime does not reproduce yet (the save-slot
+            // excerpt line), and stale bytes there decode as garbage
+            // text. See src/README.md "Open fidelity items".
+            let size = (next - previous) as usize;
+            let ptr = self.frame_tag() | previous;
+            let range = self.resolve_write_range(ptr, size)?;
+            self.memory[range].fill(0);
+            self.clear_shadow_values(ptr, size);
+        }
+        tracing::trace!(
+            target: "vm_frames",
+            program = self.program_name(program_index),
+            pc = self.pc,
+            offset = format_args!("0x{:08X}", instruction.offset),
+            previous = format_args!("0x{previous:08X}"),
+            next = format_args!("0x{next:08X}"),
+            "VM store_base"
+        );
+        self.mem_ptr = next;
+        Ok(())
+    }
+
+    pub(crate) fn frame_tag(&self) -> u32 {
+        match self.dialect {
+            BpDialect::Legacy => FRAME_SEGMENT,
+            BpDialect::V1678 => FRAME_SEGMENT_1678,
+        }
+    }
+
+    fn code_tag(&self) -> u32 {
+        match self.dialect {
+            BpDialect::Legacy => CODE_SEGMENT,
+            BpDialect::V1678 => CODE_SEGMENT_1678,
+        }
+    }
+
+    /// `(base - offset) | frame tag`, as opcode 0x04 pushes it.
+    pub(crate) fn frame_ptr(&self, offset: u32) -> u32 {
+        self.frame_tag() | self.mem_ptr.saturating_sub(offset)
+    }
+
     fn read_return_addr(&mut self) -> VmResult<u32> {
         self.mem_ptr = self.mem_ptr.saturating_sub(4);
-        self.read_int(FRAME_SEGMENT | self.mem_ptr, 2)
+        self.read_int(self.frame_tag() | self.mem_ptr, 2)
     }
 
     fn read_value(&self, ptr: u32, width: u8) -> VmResult<Value> {
@@ -9310,6 +9670,52 @@ impl Vm {
                     .message_auxiliary_input_mask = mask;
                 Value::None
             }
+            (0x81, 0x00) => {
+                if self.native_abi_profile != NativeAbiProfile::Amachoco {
+                    return Ok(None);
+                }
+                // sub_4F0A20 picks the native text codepage: 0 is CP932, 1
+                // UTF-8. This profile keeps native text in UTF-8 throughout,
+                // which is what every 1.678 script selects at boot.
+                let mode = self.pop_int()?;
+                if mode == 0 {
+                    tracing::warn!("script selected the CP932 native codepage; text stays UTF-8");
+                }
+                Value::Int(i32::from((0..=1).contains(&mode)))
+            }
+            (0x81, 0x66) => {
+                if self.native_abi_profile != NativeAbiProfile::Amachoco {
+                    return Ok(None);
+                }
+                // sub_4BA950 stores a window flag (dword_55DACC) and
+                // refreshes the native window; there is no window to refresh.
+                self.pop_int()?;
+                Value::None
+            }
+            (0x81, 0x67) => {
+                if self.native_abi_profile != NativeAbiProfile::Amachoco {
+                    return Ok(None);
+                }
+                // sub_4B77D0 copies the windowed client size that 81:64
+                // stores (sub_4B7770) into a two-dword buffer.
+                let destination = self.pop_ptr()?;
+                let (width, height) = api.windowed_client_size();
+                self.write_int(destination, 2, width as u32)?;
+                self.write_int(destination.wrapping_add(4), 2, height as u32)?;
+                Value::None
+            }
+            (0x81, 0x6c) => {
+                if self.native_abi_profile != NativeAbiProfile::Amachoco {
+                    return Ok(None);
+                }
+                // sub_4F74D0 takes an internal render size when its aspect
+                // matches the screen (0 for either means the screen size)
+                // and the call reports acceptance. The portable renderer
+                // scales to the device on its own, so every size is taken.
+                self.pop_int()?;
+                self.pop_int()?;
+                Value::Int(1)
+            }
             (0x81, 0x21) => {
                 if self.native_abi_profile!=NativeAbiProfile::Amachoco {return Ok(None);}
                 // amachoco.exe's sub_4953A0 pops source then destination and
@@ -9718,12 +10124,18 @@ impl Vm {
                 Value::Int(self.start_child_thread(operand_slots, code_bytes, data_bytes, initial_ip, false)?)
             }
             (0x81, 0x60) => {
-                // sub_4615A0: index >= 8 (unsigned) -> 1, a zero dimension
-                // -> 2, else dword_506B8C/506BAC[index] = width/height.
+                // sub_4615A0: index >= 8 (unsigned; 16 in 1.678's
+                // sub_4BAA40) -> 1, a zero dimension -> 2, else
+                // dword_506B8C/506BAC[index] = width/height.
                 let height = self.pop_int()?;
                 let width = self.pop_int()?;
                 let index = self.pop_int()?;
-                let status = if index as u32 >= 8 {
+                let slots = if self.dialect == BpDialect::V1678 {
+                    16
+                } else {
+                    8
+                };
+                let status = if index as u32 >= slots {
                     1
                 } else if width == 0 || height == 0 {
                     2
@@ -11745,7 +12157,7 @@ impl Vm {
                     let trimmed = direct.trim_matches('\0').trim_end_matches('\u{fffd}');
                     // A literal in the code region is the script's own text:
                     // scrmsg's lone "\x0c" is a page feed, not damage.
-                    let literal = text_slot && ptr & !ADDRESS_MASK == CODE_SEGMENT;
+                    let literal = text_slot && code_segment_offset(ptr).is_some();
                     if trimmed.is_empty() || literal || is_plausible_text_payload(trimmed) {
                         trimmed.to_string()
                     } else {
@@ -12303,13 +12715,11 @@ impl Vm {
     /// Segment 0 is the global window, 2 the thread's frames, 0x10..0x3F
     /// heap blocks; an unmapped address returns `u32::MAX` (out of range).
     pub(crate) fn memory_addr(&self, ptr: u32) -> u32 {
-        if ptr >> 26 == 2 {
+        if let Some(offset) = frame_segment_offset(ptr) {
             // The data region shares the local window with the code region.
-            let offset = ptr & 0x03FF_FFFF;
             return if offset < CODE_WINDOW_OFFSET { LOCAL_MEMORY_BASE + offset } else { u32::MAX };
         }
-        if ptr >> 26 == 1 {
-            let offset = ptr & 0x03FF_FFFF;
+        if let Some(offset) = code_segment_offset(ptr) {
             return if offset < CODE_WINDOW_SIZE {
                 LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET + offset
             } else {
@@ -12329,10 +12739,14 @@ impl Vm {
     /// `memory_addr` for addresses that need no heap lookup (debug watch
     /// lists); heap addresses map to `u32::MAX`.
     fn static_memory_addr(ptr: u32) -> u32 {
-        if ptr >> 26 == 2 && ptr & 0x03FF_FFFF < CODE_WINDOW_OFFSET {
-            LOCAL_MEMORY_BASE + (ptr & 0x03FF_FFFF)
-        } else if ptr >> 26 == 1 && ptr & 0x03FF_FFFF < CODE_WINDOW_SIZE {
-            LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET + (ptr & 0x03FF_FFFF)
+        if let Some(offset) =
+            frame_segment_offset(ptr).filter(|&offset| offset < CODE_WINDOW_OFFSET)
+        {
+            LOCAL_MEMORY_BASE + offset
+        } else if let Some(offset) =
+            code_segment_offset(ptr).filter(|&offset| offset < CODE_WINDOW_SIZE)
+        {
+            LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET + offset
         } else if ptr < LOCAL_MEMORY_BASE {
             ptr
         } else {
@@ -12697,6 +13111,25 @@ fn is_sjis_delimiter(c: u16) -> bool {
             | 0x8165
             | 0x8167
     )
+}
+
+/// BGI 1.678's signed shift: left for a positive count, arithmetic right
+/// for a negative one.
+fn bgi_shift(value: i32, shift: i8) -> i32 {
+    if shift >= 0 {
+        value.wrapping_shl(u32::from(shift.unsigned_abs()))
+    } else {
+        value.wrapping_shr(u32::from(shift.unsigned_abs()))
+    }
+}
+
+/// BGI 1.678's integer division: a zero divisor gives 0x80000000.
+fn bgi_div(dividend: i32, divisor: i32) -> i32 {
+    if divisor == 0 {
+        i32::MIN
+    } else {
+        dividend.wrapping_div(divisor)
+    }
 }
 
 fn read_op_u8(instruction: &BpInstruction) -> u8 {
@@ -14448,6 +14881,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -14595,6 +15029,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = Vm::new();
@@ -14636,6 +15071,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let options = VmRunOptions {
@@ -14675,6 +15111,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let options = VmRunOptions {
@@ -14719,6 +15156,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let options = VmRunOptions {
@@ -14769,6 +15207,7 @@ mod tests {
             labels: std::sync::Arc::new([(0x10, 0), (0x12, 1)].into_iter().collect()),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = Vm::new();
@@ -14830,6 +15269,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -15388,6 +15828,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
@@ -15428,6 +15869,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -15471,6 +15913,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -15539,6 +15982,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -15582,6 +16026,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
@@ -15744,6 +16189,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
@@ -15787,6 +16233,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -15834,6 +16281,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
@@ -15884,6 +16332,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
@@ -15944,6 +16393,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -15979,6 +16429,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -16151,6 +16602,7 @@ mod tests {
             labels: std::sync::Arc::new(std::iter::once((0x10, 0)).collect()),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let main = BpProgram {
@@ -16239,6 +16691,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = MediationApi { program: mediation };
@@ -16666,6 +17119,58 @@ mod tests {
         );
     }
 
+    /// Frame slots after a BGI 1.678 program that stores 5 in slot 4,
+    /// stores slot 4 + 3 in slot 8, then compares slot 8 with `imm` and
+    /// overwrites slot 4 with 99 unless they are equal.
+    fn run_v1678_compare(imm: u8) -> (u32, u32, Vm) {
+        let code = [
+            0x12, 0x08, // frame_alloc 8
+            0x0e, 0x04, 0x00, 0x16, // store_frame_imm [4] = 5 (dword)
+            0x19, 0x04, 0x80, // load_frame [4]
+            0x2c, 0x03, // add_imm 3
+            0x0f, 0x08, 0x80, // store_frame [8]
+            0x19, 0x08, 0x80, // load_frame [8]
+            0x37, 0x80, 0x0a, 0x00, imm, // jcmp_imm eq -> 0x1b
+            0x00, 0x63, // push_byte 99
+            0x0f, 0x04, 0x80, // store_frame [4]
+            0x17, // ret
+        ];
+        let program = ethornell_script::parse_bp_program(None, &code);
+        assert_eq!(program.dialect, ethornell_script::BpDialect::V1678);
+        let mut api = SchedulingApi::default();
+        let mut vm = Vm::new();
+        let report = vm.run(&program, &mut api, &VmRunOptions::default());
+        assert!(!report.stop_reason.is_fatal(), "{report:?}");
+        let slot4 = vm.read_int(vm.frame_ptr(4), 2).unwrap();
+        let slot8 = vm.read_int(vm.frame_ptr(8), 2).unwrap();
+        (slot4, slot8, vm)
+    }
+
+    #[test]
+    fn v1678_frame_ops_and_inline_compare_jumps() {
+        let (slot4, slot8, vm) = run_v1678_compare(8);
+        assert_eq!((slot4, slot8), (5, 8));
+        // 1.678 frames carry the 0x2000_0000 tag.
+        assert_eq!(vm.frame_ptr(4) & 0xF000_0000, crate::FRAME_SEGMENT_1678);
+        let (slot4, _, _) = run_v1678_compare(9);
+        assert_eq!(slot4, 99);
+    }
+
+    #[test]
+    fn v1678_varints_split_the_store_width() {
+        let mut cursor = std::io::Cursor::new(&[0x82u8, 0x04][..]);
+        assert_eq!(
+            ethornell_script::read_bp_varint(&mut cursor, 2),
+            Some((2, 128, 2))
+        );
+        // A set sign bit in the last byte extends: 0x7f is -1.
+        let mut cursor = std::io::Cursor::new(&[0x7fu8][..]);
+        assert_eq!(
+            ethornell_script::read_bp_varint(&mut cursor, 0),
+            Some((0, -1, 1))
+        );
+    }
+
     #[test]
     fn a_page_feed_literal_reaches_the_message_window_as_itself() {
         // scrmsg starts each page with GraphStartWindowMessage(window, "\x0c").
@@ -16872,6 +17377,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -16914,6 +17420,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
@@ -16978,6 +17485,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -17023,6 +17531,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -17077,6 +17586,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -17145,6 +17655,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let options = VmRunOptions {
@@ -17194,6 +17705,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
@@ -17836,6 +18348,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = Vm::new();
@@ -18439,6 +18952,7 @@ mod tests {
             labels: std::sync::Arc::new([(0x10, 0), (0x12, 1)].into_iter().collect()),
             warnings: Vec::new(),
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = Vm::new();

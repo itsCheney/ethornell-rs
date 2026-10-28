@@ -992,7 +992,11 @@ impl RuntimeEngine {
         vm.start(&program);
         Self {
             vm,
-            api: RuntimeTraceApi::new_with_native_root(manager, root),
+            api: {
+                let mut api = RuntimeTraceApi::new_with_native_root(manager, root);
+                api.configure_for_dialect(program.dialect);
+                api
+            },
             options: ethornell_vm::VmRunOptions {
                 max_steps: ethornell_vm::DEFAULT_COOPERATIVE_WATCHDOG_STEPS,
                 trace,

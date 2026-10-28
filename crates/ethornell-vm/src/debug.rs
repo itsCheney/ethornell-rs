@@ -1,4 +1,4 @@
-use crate::{FRAME_SEGMENT, Vm};
+use crate::Vm;
 use std::{
     collections::HashMap,
     sync::{
@@ -121,8 +121,8 @@ impl Vm {
             return;
         }
 
-        let body_slot_addr = FRAME_SEGMENT | self.mem_ptr.saturating_sub(0x90);
-        let body_record_addr = FRAME_SEGMENT | self.mem_ptr.saturating_sub(0x50);
+        let body_slot_addr = self.frame_ptr(0x90);
+        let body_record_addr = self.frame_ptr(0x50);
         let body_slot = self.read_int(body_slot_addr, 2).unwrap_or_default();
         if !matches!(body_slot, 12 | 13) {
             return;
@@ -162,9 +162,9 @@ impl Vm {
             return;
         }
 
-        let counter_addr = FRAME_SEGMENT | self.mem_ptr.saturating_sub(532);
-        let table_ptr_addr = FRAME_SEGMENT | self.mem_ptr.saturating_sub(2024);
-        let local_record = FRAME_SEGMENT | self.mem_ptr.saturating_sub(2016);
+        let counter_addr = self.frame_ptr(532);
+        let table_ptr_addr = self.frame_ptr(2024);
+        let local_record = self.frame_ptr(2016);
         let counter = self.read_int(counter_addr, 2).unwrap_or_default();
         let table_ptr = self.read_int(table_ptr_addr, 2).unwrap_or_default();
         let table_count = self

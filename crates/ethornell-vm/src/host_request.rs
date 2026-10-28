@@ -72,6 +72,7 @@ mod tests {
             labels: Default::default(),
             warnings: vec![],
             module_size: 0,
+            dialect: Default::default(),
             code: std::sync::Arc::new(Vec::new()),
         }
     }
