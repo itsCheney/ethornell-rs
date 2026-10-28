@@ -368,7 +368,9 @@ impl Vm {
         let length = self.pop_int()? as u32 as usize;
         let source = self.pop_ptr()?;
         let file = self.pop_string_lossy()?;
-        let path = if is_absolute_resource_path(&file) {
+        // A sandboxed host's virtual root is relative, so a name the script
+        // built from Sys80:3D (BGI 1.678 save slots) must not get it twice.
+        let path = if self.is_rooted_resource_path(api, &file) {
             file
         } else {
             format!("{}{file}", self.resource_primary_root(api))

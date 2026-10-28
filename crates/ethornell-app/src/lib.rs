@@ -9561,7 +9561,21 @@ impl RuntimeEngine {
     /// engine again from the selected bootstrap. A fresh engine over the new
     /// root replaces this one; on failure the old (halted) engine stays.
     fn take_restart(&mut self) -> Option<Self> {
-        let (root, archive, file) = self.api.native_system.bootstrap_request.take()?;
+        let (root, archive, file) = match self.api.native_system.bootstrap_request.take() {
+            Some(request) => request,
+            // A host cannot launch processes, so a Sys80:E1 restart of the
+            // game's own exe (BGI 1.678 after the language choice) starts
+            // ipl._bp again in process once the old interpreter has ended.
+            None if file_policy::restricted()
+                && self.vm.halted
+                && self.api.native_system.restart.is_some() =>
+            {
+                let (_, command_line, _) = self.api.native_system.restart.take()?;
+                tracing::info!(command_line, "Sys80:E1 restart runs ipl._bp in process");
+                (None, "system.arc".into(), "ipl._bp".into())
+            }
+            None => return None,
+        };
         let native_root = match root {
             Some(root) => {
                 let path =
@@ -9574,11 +9588,17 @@ impl RuntimeEngine {
             }
             None => self.api.native_root.clone(),
         };
-        let manager = match ResourceManager::open_game(&native_root) {
-            Ok(manager) => manager,
-            Err(err) => {
-                tracing::warn!(%err, root = %native_root.display(), "bootstrap root unusable");
-                return None;
+        // The same root keeps the session's manager (a host's launcher
+        // overlay included).
+        let manager = if native_root == self.api.native_root {
+            self.api.manager.clone()
+        } else {
+            match ResourceManager::open_game(&native_root) {
+                Ok(manager) => manager,
+                Err(err) => {
+                    tracing::warn!(%err, root = %native_root.display(), "bootstrap root unusable");
+                    return None;
+                }
             }
         };
         let bytes = match manager.read_decoded_from_archive(&archive, &file) {
@@ -9600,6 +9620,21 @@ impl RuntimeEngine {
         );
         if self.api.host_realtime_clock {
             engine.use_host_clock();
+        }
+        // Frontends cache textures by key and revision across the swap.
+        engine.api.next_graph_image_revision = self.api.next_graph_image_revision;
+        if self.api.host.enabled {
+            // HostRuntime::create's session settings, and its pending events.
+            engine.api.host = std::mem::take(&mut self.api.host);
+            engine.options = self.options.clone();
+            engine.api.debug_graph = self.api.debug_graph;
+            engine.api.trace_render_tree = self.api.trace_render_tree;
+            engine.api.auto_title_click = self.api.auto_title_click;
+            engine.api.auto_user_click = self.api.auto_user_click;
+            engine.api.title_compatibility_render_fallback =
+                self.api.title_compatibility_render_fallback;
+            engine.api.legacy_scenario_mode_input = self.api.legacy_scenario_mode_input;
+            engine.api.call_coverage_enabled = self.api.call_coverage_enabled;
         }
         tracing::info!(
             archive,
@@ -21788,7 +21823,8 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                     }
                     return Ok(Some(self.host.request_retry(text(2), file)));
                 }
-                if (g == 0x80 && matches!(id, 0x3B | 0x3F | 0xE1 | 0xF0..=0xFC))
+                // Sys80:E1 runs natively: take_restart re-enters ipl._bp.
+                if (g == 0x80 && matches!(id, 0x3B | 0x3F | 0xF0..=0xFC))
                     || (g == 0x81 && matches!(id, 0x20 | 0x22..=0x26 | 0x38 | 0x3A | 0x3B))
                     || (g == 0xB0 && id == 0xF0)
                 {
@@ -22875,10 +22911,6 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         command_line: &str,
         error_message: Option<&str>,
     ) {
-        if file_policy::restricted() {
-            self.host.unsupported("process restart");
-            return;
-        }
         self.native_system.restart = Some((
             working_directory.to_owned(),
             command_line.to_owned(),
@@ -23915,8 +23947,9 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             (0x80, 0x2a) => {
                 let path = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
                 if let Some(policy) = file_policy::active() {
+                    // Like Sys80:28, a root UserData name means the user tree.
                     return Ok(ethornell_vm::Value::Int(i32::from(
-                        policy.metadata(&path).is_some_and(|m| m.is_dir()),
+                        policy.user_metadata(&path).is_some_and(|m| m.is_dir()),
                     )));
                 }
                 let exists = runtime_file_path_from_root(&self.manager, &self.native_root, &path)

@@ -129,6 +129,7 @@ pub(crate) fn is_user_alias(name: &str) -> bool {
 fn is_root_save_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower == "bgi.gdb"
+        || lower == "bgierror.txt"
         || lower
             .strip_prefix("bgi")
             .and_then(|rest| rest.strip_suffix(".cad"))
@@ -1263,6 +1264,7 @@ mod tests {
             "bgi-resource\\UserData\\SubarashikihibiHD001.sud"
         ));
         assert!(is_user_alias("bgi-resource\\BGI.gdb"));
+        assert!(is_user_alias("bgi-resource\\BGIError.txt"));
         assert!(!is_user_alias("bgi-resource\\data01000.arc"));
         assert!(!is_user_alias("bgi-user\\BGI.gdb"));
         // Existence checks of an aliased save must look in the user root.

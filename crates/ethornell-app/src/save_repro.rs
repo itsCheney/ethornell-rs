@@ -4,6 +4,8 @@ use super::*;
 #[ignore = "requires a writable copy of a game via ETHORNELL_REPRO_GAME"]
 fn game_input_repro() {
     ethornell_core::init_tracing();
+    let font = snapshot::load_default_font().ok();
+    let _font_session = font.as_ref().map(snapshot::enter_font_session);
     let root = PathBuf::from(std::env::var_os("ETHORNELL_REPRO_GAME").expect("game copy"));
     let manager = ResourceManager::open_game(&root).unwrap();
     let bytes = manager

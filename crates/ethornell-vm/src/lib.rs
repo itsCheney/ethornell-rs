@@ -19630,15 +19630,52 @@ mod tests {
         assert!(api.writes.is_empty());
     }
 
+    #[test]
+    fn sys80_32_keeps_a_name_already_under_a_virtual_root() {
+        // BGI 1.678 builds save names from Sys80:3D; a host's relative root
+        // must not be prepended a second time.
+        let instruction =
+            test_instruction(0, 0x80, "sys1", vec![0x80, 0x32], vec![BpOperand::U8(0x32)]);
+        let mut vm = Vm::new();
+        let mut api = WriteFileApi {
+            success: true,
+            root: Some("bgi-resource\\".into()),
+            ..WriteFileApi::default()
+        };
+        for file in ["bgi-resource\\UserData\\slot.sud", "UserData\\slot.sud"] {
+            vm.stack
+                .extend([Value::Str(file.into()), Value::Int(0), Value::Int(0)]);
+            vm.dispatch(&instruction, &mut api).unwrap();
+            vm.stack.clear();
+        }
+        let paths = api
+            .writes
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                "bgi-resource\\UserData\\slot.sud",
+                "bgi-resource\\UserData\\slot.sud"
+            ]
+        );
+    }
+
     #[derive(Default)]
     struct WriteFileApi {
         success: bool,
+        root: Option<String>,
         writes: Vec<(String, Vec<u8>)>,
     }
 
     impl SysApi for WriteFileApi {
         fn call_sys(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
             panic!("WriteFileBytes must not fall through to host dispatch");
+        }
+
+        fn primary_resource_root(&mut self) -> Option<String> {
+            self.root.clone()
         }
 
         fn write_file_bytes(&mut self, path: &str, bytes: &[u8]) -> bool {

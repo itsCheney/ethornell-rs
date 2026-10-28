@@ -1236,7 +1236,14 @@ mod tests {
     #[test]
     fn native_host_routing_is_group_specific_and_nonhost_queries_fall_through() {
         let mut api = api();
-        for (group, id) in [(0x80, 0xFD), (0x81, 0x3C), (0x90, 0x11), (0xB0, 0x83)] {
+        // Sys80:E1 runs natively; take_restart re-enters ipl._bp.
+        for (group, id) in [
+            (0x80, 0xE1),
+            (0x80, 0xFD),
+            (0x81, 0x3C),
+            (0x90, 0x11),
+            (0xB0, 0x83),
+        ] {
             assert_eq!(
                 api.begin_host_request(&HostRequest::Native {
                     opcode: ethornell_vm::NativeOpcode { group, id },
@@ -1248,7 +1255,6 @@ mod tests {
         }
         for (group, id) in [
             (0x80, 0x3B),
-            (0x80, 0xE1),
             (0x80, 0xF2),
             (0x81, 0x38),
             (0xB0, 0xF0),
@@ -1428,6 +1434,27 @@ mod tests {
         assert!(create("../resource/plain.exe").contains("host_policy:130:"));
         assert!(create("plain.exe").contains("no packed files"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sys80_e1_restart_reruns_ipl_in_process_with_the_host_session() {
+        let (root, mut host) = minimal_host("e1-restart");
+        host.scope(|host| {
+            let api = &mut host.runtime.api;
+            ethornell_vm::SysApi::schedule_restart(api, "bgi-resource\\", "BGI.exe", None);
+            assert!(
+                host.runtime.take_restart().is_none(),
+                "waits for the old interpreter"
+            );
+            host.runtime.vm.halted = true;
+            let restarted = host.runtime.take_restart().unwrap();
+            assert!(restarted.api.host.enabled);
+            assert!(!restarted.vm.halted);
+            assert!(host.runtime.api.native_system.restart.is_none());
+        });
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
