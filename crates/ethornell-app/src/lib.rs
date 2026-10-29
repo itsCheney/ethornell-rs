@@ -3748,11 +3748,34 @@ impl RuntimeTraceApi {
         }
     }
 
-    /// BGI 1.678 doubled the display-mode table (sub_4BAA40).
+    /// BGI 1.678 doubled the display-mode table (sub_4BAA40) and changed its
+    /// defaults (dword_5482C8 widths / dword_548288 heights). Amairo
+    /// Chocolata 3 picks mode 8 (1920x1080) without registering it.
     pub(crate) fn configure_for_dialect(&mut self, dialect: ethornell_script::BpDialect) {
         self.display_mode_count = match dialect {
             ethornell_script::BpDialect::Legacy => 8,
-            ethornell_script::BpDialect::V1678 => 16,
+            ethornell_script::BpDialect::V1678 => {
+                const SIZES: [(i32, i32); 16] = [
+                    (320, 240),
+                    (640, 480),
+                    (800, 600),
+                    (1024, 768),
+                    (1024, 576),
+                    (1280, 960),
+                    (1280, 720),
+                    (1920, 1440),
+                    (1920, 1080),
+                    (2560, 1920),
+                    (2560, 1440),
+                    (3840, 2880),
+                    (3840, 2160),
+                    (1600, 900),
+                    (1366, 768),
+                    (960, 540),
+                ];
+                self.display_mode_sizes = SIZES.map(Some);
+                16
+            }
         };
     }
 
@@ -17253,6 +17276,17 @@ mod input_tests {
             call_graph(&mut api, 0x92, 0x9d, &mut too_wide).unwrap(),
             Value::Int(3)
         );
+    }
+
+    #[test]
+    fn bgi_1678_mode_8_is_1920_by_1080_without_registration() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        api.configure_for_dialect(ethornell_script::BpDialect::V1678);
+        let mut args = vec![Value::Int(8), Value::Int(1), Value::Int(0)];
+        call_sys(&mut api, 0x80, 0x60, &mut args).unwrap();
+        assert_eq!((api.screen_width, api.screen_height), (1920, 1080));
     }
 
     #[test]
