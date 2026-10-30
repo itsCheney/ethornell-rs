@@ -786,6 +786,9 @@ struct RuntimeTraceApi {
     /// (dword_548288 / dword_5482C8), earlier builds 8.
     display_mode_sizes: [Option<(i32, i32)>; 16],
     display_mode_count: usize,
+    /// BGI 1.678 (sub_493150) returns 9 for Graph90:58 bitmaps of different
+    /// sizes and its handler ignores that code; 1.622 fails the script.
+    sprite_dual_bitmap_mismatch_ignored: bool,
     /// dword_506B88 / dword_518614: the Sys80:60 size index and pixel mode.
     display_size_index: i32,
     /// GetAdapterDisplayMode width/height (dword_5177C0/C4); 0 when unknown.
@@ -1298,6 +1301,7 @@ impl RuntimeTraceApi {
                 None,
             ],
             display_mode_count: 8,
+            sprite_dual_bitmap_mismatch_ignored: false,
             display_size_index: 2,
             desktop_display_size: (0, 0),
             display_adapter_description: String::new(),
@@ -3752,6 +3756,7 @@ impl RuntimeTraceApi {
     /// defaults (dword_5482C8 widths / dword_548288 heights). Amairo
     /// Chocolata 3 picks mode 8 (1920x1080) without registering it.
     pub(crate) fn configure_for_dialect(&mut self, dialect: ethornell_script::BpDialect) {
+        self.sprite_dual_bitmap_mismatch_ignored = dialect == ethornell_script::BpDialect::V1678;
         self.display_mode_count = match dialect {
             ethornell_script::BpDialect::Legacy => 8,
             ethornell_script::BpDialect::V1678 => {

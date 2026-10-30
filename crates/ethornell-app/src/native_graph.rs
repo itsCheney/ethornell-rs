@@ -3556,6 +3556,10 @@ impl RuntimeTraceApi {
                         args[3], args[4]
                     ));
                 }
+                if sizes[0] != sizes[1] && self.sprite_dual_bitmap_mismatch_ignored {
+                    // sub_476BC0 leaves the sprite as it was.
+                    return Some(Ok(ethornell_vm::Value::None));
+                }
                 if sizes[0] != sizes[1] {
                     return fail(format!(
                         "ビットマップ [ {} , {} ] のサイズが一致しません",

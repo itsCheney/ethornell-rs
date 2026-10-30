@@ -1165,6 +1165,7 @@ mod tests {
                     host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed before frame={frame} usage={:?}",host.runtime.vm.resource_usage())))?;
                     let report = runtime_frontend::drive_runtime_frame_checked(&mut host.runtime,&mut host.input_queue,&mut input,RuntimeFramePacing,16,16,None,"restricted-repro",false)?;
                     host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed after frame={frame} root_memory={} usage={:?} tasks={:#?}",host.runtime.vm.memory.len(),host.runtime.vm.resource_usage(),host.runtime.vm.task_memory_breakdown())))?;
+                    if std::env::var("ETHORNELL_RESTRICTED_REPRO_SNAPSHOT_AT").ok().and_then(|v|v.parse::<usize>().ok())==Some(frame) {if let Some(path)=std::env::var_os("ETHORNELL_RESTRICTED_REPRO_SNAPSHOT") {snapshot::write_runtime_snapshot(&host.runtime.api,Path::new(&path))?;}}
                     let usage=host.runtime.vm.resource_usage();peak_capacity=peak_capacity.max(usage.memory_capacity_bytes);peak_vms=peak_vms.max(usage.vm_count);
                     if let Some(message)=host.runtime.api.host.fatal.take() {return Err(EthornellError::Other(format!("restricted host failure at frame={frame}; opcode={:?}; category={}",host.runtime.api.last_native_call,if message.contains("missing BP program") {"missing_program"} else {"host_denied"})));}
                     if let Some(report)=report.last_report.as_ref().filter(|r|r.stop_reason.is_fatal()) {
@@ -1172,8 +1173,15 @@ mod tests {
                         return Err(EthornellError::Other(format!("restricted VM fatal frame={frame} stop={:?} pc={} offset={:?} opcode={:?} unsupported={unsupported} local_trace={:?}",report.stop_reason,report.pc,report.offset,host.runtime.api.last_native_call,report.recent_trace.iter().rev().take(2).collect::<Vec<_>>())));
                     }
                     if let Some(error)=snapshot::take_raster_error() {return Err(EthornellError::Other(error));}
-                    if snapshot::take_missing_glyphs() {return Err(EthornellError::Other("font missing glyph in restricted sample".into()));}
+                    if snapshot::take_missing_glyphs() && std::env::var_os("ETHORNELL_RESTRICTED_ALLOW_MISSING_GLYPHS").is_none() {return Err(EthornellError::Other("font missing glyph in restricted sample".into()));}
                     if host.runtime.api.quit_requested {return Err(EthornellError::Other(format!("sample requested exit frame={frame}")));}
+                    if let Some(answer)=std::env::var("ETHORNELL_RESTRICTED_ANSWER").ok().and_then(|v|v.parse::<i32>().ok()) {
+                        if let Some(event)=host.runtime.api.host.events.iter().find(|e|e.kind==2).cloned() {
+                            host.runtime.api.host.events.retain(|e|e.request_id!=event.request_id);
+                            eprintln!("restricted answer frame={frame} request={:?} -> {answer}",event.text);
+                            host.complete_request(event.request_id,answer)?;
+                        }
+                    }
                     if let Some(event)=host.runtime.api.host.events.iter().find(|e|e.kind==2) {
                         let save_failure=event.text.contains("保存") || event.text.contains("書き込み");
                         return Err(EthornellError::Other(format!("restricted sample blocked host_request frame={frame} save_failure={save_failure} opcode={:?} user_files={:?}",host.runtime.api.last_native_call,host.policy.enumerate("*",true,0,false).unwrap_or_default())));

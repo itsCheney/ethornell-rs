@@ -3825,6 +3825,17 @@ impl Vm {
                 joined.extend_from_slice(&right);
                 self.write_c_string_native_bytes(dst, &joined)?;
             }
+            BpOpcode::Known { code: 0x6c, .. } if self.dialect == BpDialect::V1678 => {
+                let ptr = self.pop_ptr()?;
+                let start = self.memory_addr(ptr) as usize;
+                let text = self.memory.get(start..).unwrap_or_default();
+                let text = &text[..text.iter().position(|&b| b == 0).unwrap_or(text.len())];
+                let [length, ch, wide, delimiter] = getchar_1678(text);
+                self.push_value(Value::Int(length));
+                self.push_value(Value::Int(ch));
+                self.push_value(Value::Int(wide));
+                self.push_value(Value::Int(delimiter));
+            }
             BpOpcode::Known { code: 0x6c, .. } => {
                 let ptr = self.pop_ptr()?;
                 let start = self.memory_addr(ptr) as usize;
@@ -13113,6 +13124,103 @@ fn is_sjis_delimiter(c: u16) -> bool {
     )
 }
 
+/// BGI 1.678 text encodings, as sub_4F1D90 guesses them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TextEncoding1678 {
+    ShiftJis,
+    Utf8,
+    /// No byte above 0x7F (0x80000000 in the exe).
+    Ascii,
+}
+
+/// sub_4F1D90: UTF-8 when every multibyte sequence is well formed (it stops
+/// looking after six), ASCII when there are none, Shift-JIS otherwise.
+fn guess_text_encoding_1678(text: &[u8]) -> TextEncoding1678 {
+    let mut at = 0;
+    let mut sequences = 0;
+    while let Some(&lead) = text.get(at) {
+        if lead < 0x80 {
+            at += 1;
+            continue;
+        }
+        if lead < 0xc2 {
+            return TextEncoding1678::ShiftJis;
+        }
+        let length = lead.leading_ones() as usize;
+        let continued = (1..length).all(|i| text.get(at + i).is_some_and(|b| b & 0xc0 == 0x80));
+        if !continued {
+            return TextEncoding1678::ShiftJis;
+        }
+        sequences += 1;
+        if sequences >= 6 {
+            break;
+        }
+        at += length;
+    }
+    if sequences == 0 {
+        TextEncoding1678::Ascii
+    } else {
+        TextEncoding1678::Utf8
+    }
+}
+
+/// Opcode 0x6C in BGI 1.678 (0x4CE5E0 -> sub_4F1C40): byte length,
+/// character, wide flag and the delimiter flag of the character at the start
+/// of `text`. Shift-JIS keeps the legacy values; UTF-8 yields the code point,
+/// wide unless ASCII or half-width katakana (sub_4F1BA0), and checks the
+/// Unicode table at 0x52A670 (sub_47C970).
+fn getchar_1678(text: &[u8]) -> [i32; 4] {
+    let first = text.first().copied().unwrap_or_default();
+    match guess_text_encoding_1678(text) {
+        TextEncoding1678::ShiftJis => {
+            // sub_4F1910 also treats 0xFF as a lead byte.
+            let two = matches!(first, 0x81..=0x9f | 0xe0..=0xfc | 0xff);
+            let ch = if two {
+                u16::from_be_bytes([first, text.get(1).copied().unwrap_or_default()])
+            } else {
+                u16::from(first)
+            };
+            [
+                1 + two as i32,
+                i32::from(ch),
+                two as i32,
+                is_sjis_delimiter(ch) as i32,
+            ]
+        }
+        TextEncoding1678::Utf8 => {
+            let length = if first < 0x80 {
+                1
+            } else {
+                first.leading_ones() as usize
+            };
+            let ch = std::str::from_utf8(&text[..length.min(text.len())])
+                .ok()
+                .and_then(|s| s.chars().next())
+                .map_or(u32::from(first), u32::from);
+            let wide = ch >= 0x80 && !(0xff61..0xffa0).contains(&ch);
+            [
+                length as i32,
+                ch as i32,
+                wide as i32,
+                is_unicode_delimiter_1678(ch) as i32,
+            ]
+        }
+        TextEncoding1678::Ascii => [
+            1,
+            i32::from(first),
+            0,
+            is_unicode_delimiter_1678(u32::from(first)) as i32,
+        ],
+    }
+}
+
+/// The UTF-16 table at 0x52A670 in BGI 1.678.
+fn is_unicode_delimiter_1678(c: u32) -> bool {
+    "，．、。,.､｡:;?!ﾞﾟ･：；？！゛゜‐]})）〕］｝〉》」』】‘“"
+        .chars()
+        .any(|d| u32::from(d) == c)
+}
+
 /// BGI 1.678's signed shift: left for a positive count, arithmetic right
 /// for a negative one.
 fn bgi_shift(value: i32, shift: i8) -> i32 {
@@ -17154,6 +17262,38 @@ mod tests {
         assert_eq!(vm.frame_ptr(4) & 0xF000_0000, crate::FRAME_SEGMENT_1678);
         let (slot4, _, _) = run_v1678_compare(9);
         assert_eq!(slot4, 99);
+    }
+
+    #[test]
+    fn v1678_getchar_pushes_the_byte_length_first() {
+        let code = [
+            0x12, 0x18, // frame_alloc 24
+            0x0e, 0x04, 0x00, 0x8a, 0x84, 0x0a, // [4] = "\x82\xa0" (あ)
+            0x04, 0x04, 0x00, // push_base_offset 4
+            0x6c, // getchar
+            0x0f, 0x08, 0x80, // [8] = delimiter class
+            0x0f, 0x0c, 0x80, // [12] = double-byte flag
+            0x0f, 0x10, 0x80, // [16] = character
+            0x0f, 0x14, 0x80, // [20] = length
+            0x17, // ret
+        ];
+        let program = ethornell_script::parse_bp_program(None, &code);
+        assert_eq!(program.dialect, ethornell_script::BpDialect::V1678);
+        let mut api = SchedulingApi::default();
+        let mut vm = Vm::new();
+        let report = vm.run(&program, &mut api, &VmRunOptions::default());
+        assert!(!report.stop_reason.is_fatal(), "{report:?}");
+        let slot = |n| vm.read_int(vm.frame_ptr(n), 2).unwrap();
+        assert_eq!((slot(20), slot(16), slot(12)), (2, 0x82a0, 1));
+    }
+
+    #[test]
+    fn v1678_getchar_reads_utf8_text_as_code_points() {
+        assert_eq!(crate::getchar_1678("已读".as_bytes()), [3, 0x5df2, 1, 0]);
+        assert_eq!(crate::getchar_1678("。".as_bytes()), [3, 0x3002, 1, 1]);
+        assert_eq!(crate::getchar_1678(b"a,"), [1, 0x61, 0, 0]);
+        assert_eq!(crate::getchar_1678(b",\x82\xa0"), [1, 0x2c, 0, 1]);
+        assert_eq!(crate::getchar_1678(b"\x82\xa0"), [2, 0x82a0, 1, 0]);
     }
 
     #[test]
