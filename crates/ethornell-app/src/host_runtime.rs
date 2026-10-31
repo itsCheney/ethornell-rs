@@ -1146,7 +1146,7 @@ mod tests {
             // It invokes the exact shared checked frontend under the same
             // scoped policy/font, with an explicit silent audio-free backend.
             host.scope(|host| -> Result<()> {
-                let mut peak_capacity=0;let mut peak_vms=0;
+                let mut last_program=String::new();let mut peak_capacity=0;let mut peak_vms=0;
                 let mut input=HeadlessInputScript::from_env();
                 let measure_only=std::env::var_os("ETHORNELL_RESTRICTED_REPRO_MEASURE").is_some();
                 let frames=std::env::var("ETHORNELL_RESTRICTED_REPRO_FRAMES").ok().and_then(|v|v.parse::<usize>().ok()).unwrap_or(1200).min(5000);
@@ -1165,6 +1165,7 @@ mod tests {
                     host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed before frame={frame} usage={:?}",host.runtime.vm.resource_usage())))?;
                     let report = runtime_frontend::drive_runtime_frame_checked(&mut host.runtime,&mut host.input_queue,&mut input,RuntimeFramePacing,16,16,None,"restricted-repro",false)?;
                     host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed after frame={frame} root_memory={} usage={:?} tasks={:#?}",host.runtime.vm.memory.len(),host.runtime.vm.resource_usage(),host.runtime.vm.task_memory_breakdown())))?;
+                    if std::env::var_os("ETHORNELL_RESTRICTED_PROGRAMS").is_some() {if let Some(r)=report.last_report.as_ref() {let name=r.program.split('#').next().unwrap_or_default().to_string();if name!=last_program {eprintln!("program frame={frame} {name} pc={} native={:?}",r.pc,host.runtime.api.last_native_call);last_program=name;}}}
                     if std::env::var("ETHORNELL_RESTRICTED_REPRO_SNAPSHOT_AT").ok().and_then(|v|v.parse::<usize>().ok())==Some(frame) {if let Some(path)=std::env::var_os("ETHORNELL_RESTRICTED_REPRO_SNAPSHOT") {snapshot::write_runtime_snapshot(&host.runtime.api,Path::new(&path))?;}}
                     let usage=host.runtime.vm.resource_usage();peak_capacity=peak_capacity.max(usage.memory_capacity_bytes);peak_vms=peak_vms.max(usage.vm_count);
                     if let Some(message)=host.runtime.api.host.fatal.take() {return Err(EthornellError::Other(format!("restricted host failure at frame={frame}; opcode={:?}; category={}",host.runtime.api.last_native_call,if message.contains("missing BP program") {"missing_program"} else {"host_denied"})));}

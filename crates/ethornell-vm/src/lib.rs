@@ -7760,9 +7760,12 @@ impl Vm {
                 self.thread.data_region_size()
             )));
         }
-        if next > previous {
-            // The target leaves the new frame untouched (sub_4738A0).
-            // Clearing it is kept on purpose: some scripts read frame
+        // The target leaves the new frame untouched (sub_4738A0), and BGI
+        // 1.678 scripts rely on that: Amairo Chocolata 3's route menu returns
+        // the scenario name in its dead frame, and title._bp reads it after
+        // allocating a new frame over it.
+        if next > previous && self.dialect != BpDialect::V1678 {
+            // Older builds still clear it on purpose: some scripts read frame
             // slots that the original had filled by a step the
             // portable runtime does not reproduce yet (the save-slot
             // excerpt line), and stale bytes there decode as garbage
@@ -17262,6 +17265,25 @@ mod tests {
         assert_eq!(vm.frame_ptr(4) & 0xF000_0000, crate::FRAME_SEGMENT_1678);
         let (slot4, _, _) = run_v1678_compare(9);
         assert_eq!(slot4, 99);
+    }
+
+    #[test]
+    fn v1678_frame_alloc_keeps_a_dead_frame_readable() {
+        let code = [
+            0x12, 0x08, // frame_alloc 8
+            0x0e, 0x04, 0x00, 0x16, // [4] = 5
+            0x12, 0x78, // frame_alloc -8
+            0x12, 0x08, // frame_alloc 8
+            0x17, // ret
+        ];
+        let program = ethornell_script::parse_bp_program(None, &code);
+        assert_eq!(program.dialect, ethornell_script::BpDialect::V1678);
+        let mut api = SchedulingApi::default();
+        let mut vm = Vm::new();
+        let report = vm.run(&program, &mut api, &VmRunOptions::default());
+        assert!(!report.stop_reason.is_fatal(), "{report:?}");
+        // sub_4738A0 does not clear the new frame.
+        assert_eq!(vm.read_int(vm.frame_ptr(4), 2).unwrap(), 5);
     }
 
     #[test]
